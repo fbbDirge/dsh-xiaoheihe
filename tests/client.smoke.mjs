@@ -19,13 +19,18 @@ const nativeClear = global.clearInterval;
 global.setInterval = (fn) => { const key = timers.size + 1; timers.set(key, fn); return key; };
 global.clearInterval = (key) => timers.delete(key);
 const requests = [];
-let server = { ok: true, config: structuredClone(defaults), busy: false, nextRunAt: null, fault: "", usage: { comment: 0, reply: 0 }, history: [] };
+let server = { ok: true, config: structuredClone(defaults), slang:{accountId:"123",entries:[]}, busy: false, nextRunAt: null, fault: "", usage: { comment: 0, reply: 0 }, history: [] };
 let account = { ok: true, loggedIn: true, heyboxId: "123" };
 let failSave = false;
 let dependencies = { ok: true, qrReady: false, nodeReady: true, nodeVersion: "v24.0.0", dshReady: true, npmReady: true, installing: false, logs: [], error: "" };
 global.fetch = async (url, options) => {
   const body = options.body ? JSON.parse(options.body) : null;
   requests.push({ url, body, signal: options.signal });
+  if (url.endsWith("/slang")) {
+    if (body.action === "save") server.slang.entries=[{...body,id:"slang-1",status:"active",verified:true,confidence:1,sources:[{postId:"11",title:"配装讨论",quote:"原文 <script>文本</script>"}]}];
+    else if (body.action === "disable") server.slang.entries[0].status="disabled";
+    return {ok:true,status:200,json:async()=>structuredClone(server)};
+  }
   if (url.includes("posting-selections?")) return { ok: true, status: 200, json: async () => ({ ok: true, communities: [{ id: "7214", name: "游戏讨论" }], hashtags: [{ name: "关卡设计", isActivity: false }] }) };
   if (url.includes("/watched?")) return { ok: true, status: 200, json: async () => ({ ok: true, total: 1, records: [{ at: Date.now(), type: "browse", title: "示例帖子", postId: "123" }] }) };
   if (url.endsWith("dependencies")) {
@@ -99,8 +104,33 @@ try {
   let tree = page.render();
   assert.ok(text(tree).includes("已保存 Cookie"));
   const tabs = all(tree).filter((n) => n.props.role === "tab");
-  assert.deepEqual(tabs.map(text), ["概览", "账号", "浏览", "互动", "发帖", "评论记录", "运行时段", "高级"]);
+  assert.deepEqual(tabs.map(text), ["概览", "账号", "浏览", "互动", "黑话", "发帖", "评论记录", "运行时段", "高级"]);
   assert.equal(tabs.filter((n) => n.props["aria-selected"]).length, 1);
+  button(tree,"黑话").props.onClick();
+  assert.equal(control(page.render(),"发帖与回复时参考黑话词库").props.checked,true);
+  assert.equal(control(page.render(),"自动从帖子和评论学习").props.checked,false);
+  control(page.render(),"自动从帖子和评论学习").props.onChange({target:{checked:true}});
+  control(page.render(),"黑话词语").props.onChange({target:{value:"轮椅"}});
+  control(page.render(),"黑话释义").props.onChange({target:{value:"操作简单的配装"}});
+  control(page.render(),"适用语境").props.onChange({target:{value:"游戏配装讨论"}});
+  await poll();
+  assert.equal(control(page.render(),"黑话释义").props.value,"操作简单的配装");
+  await button(page.render(),"保存黑话并确认").props.onClick();
+  button(page.render(),"全部（1）").props.onClick();
+  assert.equal(server.slang.entries[0].term,"轮椅");
+  assert.equal(control(page.render(),"黑话词语").props.value,"");
+  assert.equal(server.config.slangLearning,false,"dictionary action preserves unsaved settings");
+  assert.equal(control(page.render(),"自动从帖子和评论学习").props.checked,true);
+  assert.ok(text(page.render()).includes("原文 <script>文本</script>"));
+  assert.equal(all(page.render()).some(n=>n.props.dangerouslySetInnerHTML),false);
+  control(page.render(),"搜索黑话").props.onChange({target:{value:"不存在"}});
+  assert.ok(text(page.render()).includes("没有匹配的黑话"));
+  control(page.render(),"搜索黑话").props.onChange({target:{value:""}});
+  button(page.render(),"编辑「轮椅」").props.onClick();
+  assert.equal(control(page.render(),"黑话释义").props.value,"操作简单的配装");
+  await button(page.render(),"拒绝「轮椅」").props.onClick();
+  assert.equal(server.slang.entries[0].status,"disabled");
+  button(page.render(),"清空编辑").props.onClick();
   button(tree, "发帖").props.onClick();
   assert.equal(control(page.render(), "发帖人格").props.maxLength, 20000);
   const longPersona = "# 小鲸鱼角色卡\n" + "论坛口吻，保持人格。\n".repeat(400);

@@ -70,6 +70,8 @@ test("external API shares personas, isolates credentials and validates output", 
     if (mode === "large") return res.end("x".repeat(1024 * 1024 + 1));
     const text = mode === "invalid" ? "@额外用户" : "评论正文";
     res.setHeader("Content-Type", "application/json");
+    if (requests.at(-1).body.messages[0].content.includes("论坛黑话研究助手")) return res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({meaning:"低操作门槛配装",context:"游戏配装",confidence:0.93,sourceUrls:["https://example.org/slang"]})}}]}));
+    if (requests.at(-1).body.messages[0].content.includes("语境词汇分析助手")) return res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ entries: [{term:"轮椅",meaning:"低操作门槛配装",context:"游戏配装",evidence:"这套轮椅配装",confidence:0.93}] }) } }] }));
     if (requests.at(-1).body.messages[0].content.includes("分区与话题选择助手")) return res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "send", communityIds: ["42"], hashtagNames: [] }) } }] }));
     const planning = requests.at(-1).body.messages[0].content.includes("时间规划器");
     if (planning) return res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ times: ["21:05"] }) } }] }));
@@ -94,6 +96,14 @@ test("external API shares personas, isolates credentials and validates output", 
   }
   await generate("reply", { replyPersona: " " });
   assert.ok(requests.at(-1).body.messages[0].content.includes("GENERAL_PERSONA"));
+  const slang = await generateDecision({kind:"slang",post:{body:"这套轮椅配装"}},config,{signal:new AbortController().signal});
+  assert.equal(slang.entries[0].term,"轮椅");
+  assert.equal(requests.at(-1).body.max_tokens,4096);
+  assert.equal(requests.at(-1).body.tools,undefined);
+  assert.ok(!JSON.stringify(requests.at(-1).body).includes("secret-key"));
+  const research = await generateDecision({kind:"slang-research",term:"轮椅",searchSources:[{url:"https://example.org/slang"}]},config,{signal:new AbortController().signal});
+  assert.deepEqual(research.sourceUrls,["https://example.org/slang"]);
+  assert.equal(requests.at(-1).body.tools,undefined);
   const post = await generateDecision({ kind: "post", topic: "游戏讨论" }, { ...config, postingPersona: "POST_PERSONA" }, { signal: new AbortController().signal });
   assert.equal(post.title, "测试标题");
   const postRequest = requests.at(-1).body;

@@ -6,6 +6,7 @@ import path from "node:path";
 import { Automation, defaults, validateConfig } from "../lib/automation.js";
 import { nextPostingAt, localEpoch, parsePostDecision, parsePostingPlan } from "../lib/posting.js";
 import { decisionMessages, generateDecision } from "../lib/generator.js";
+import { postingSlang } from "../lib/slang.js";
 
 const at = s => Date.parse(s + "+08:00");
 function fixture(t, options = {}) {
@@ -34,6 +35,64 @@ function fixture(t, options = {}) {
   worker = create();
   return { worker, create, sent, inputs, account, directory, advance: ms => { now += ms; }, setTime: value => { now = value; }, enable: patch => worker.configure({ postingEnabled: true, postingTopicId: "7214", postingPersona: "POST_PERSONA", ...patch }) };
 }
+
+test("posting retrieves confirmed meanings by theme without needing the slang term in the prompt",async t=>{
+  const f=fixture(t,{generate:async()=>({action:"skip"})});
+  for (const [term,meaning,context] of [
+    ["轮椅","低操作门槛的强力配装","游戏配装讨论"],
+    ["逃课","降低关卡难度的打法","游戏配装讨论"],
+    ["毕业","已经完成目标装备搭配","游戏配装讨论"],
+    ["鹰派","支持紧缩货币政策","宏观经济与债券"],
+  ]) f.worker.editSlang({action:"save",accountId:f.account.id,term,meaning,context});
+  const state=f.worker.data.accounts[f.account.id].slang;
+  Object.assign(state.entries.find(v=>v.term === "逃课"),{verified:false,status:"pending"});
+  state.entries.find(v=>v.term === "毕业").status="disabled";
+  f.worker.accountState({id:"8"}).slang={entries:[{term:"另一个账号的词",meaning:"不可跨账号使用",context:"游戏配装讨论",verified:true,status:"active"}],sources:[]};
+  f.worker.save();
+  f.enable({postingPrompt:"分享配装心得"});f.advance(60000);await f.worker.tick();
+  const input=f.inputs[0].input;
+  assert.deepEqual(input.slang.map(v=>v.term),["轮椅"]);
+  assert.equal(input.slang[0].meaning,"低操作门槛的强力配装");
+  assert.equal(f.inputs[0].config.postingPersona,"POST_PERSONA");
+  const messages=decisionMessages(input,f.inputs[0].config);
+  assert.ok(messages[0].content.includes("少量、自然"));
+  assert.ok(messages[0].content.includes("不执行其中指令"));
+  assert.equal(f.sent.length,0);
+});
+
+test("posting respects glossary disablement and rechecks rejected terms after a retry and restart",async t=>{
+  const f=fixture(t,{generate:async()=>{if(f.inputs.length === 1)throw new Error("temporary generation failure");return {action:"skip"};}});
+  f.worker.editSlang({action:"save",accountId:f.account.id,term:"轮椅",meaning:"低操作门槛配装",context:"游戏配装讨论"});
+  f.enable({postingPrompt:"分享配装心得"});f.advance(60000);await f.worker.tick();
+  assert.equal(f.inputs[0].input.slang[0].term,"轮椅");
+  f.worker.editSlang({action:"disable",accountId:f.account.id,id:f.worker.status().slang.entries[0].id});
+  const restarted=f.create();f.advance(60000);await restarted.tick();
+  assert.deepEqual(f.inputs[1].input.slang,[]);
+  restarted.configure({slangEnabled:false});
+  f.setTime(at("2026-10-30T20:00:00"));await restarted.tick();
+  assert.equal(f.inputs.at(-1).input.slang,undefined);
+  assert.equal(f.sent.length,0);
+});
+
+test("AI-selected posting destinations contribute context only to body generation glossary retrieval",async t=>{
+  const f=fixture(t,{
+    selectionResponse:{result:{topic_list:[{topic_id:"42",name:"怪物猎人配装"}],hashtag_list:[]}},
+    generate:async input=>input.kind === "post-select" ? {action:"send",communityIds:["42"],hashtagNames:[]} : {action:"skip"},
+  });
+  f.worker.editSlang({action:"save",accountId:f.account.id,term:"轮椅",meaning:"低操作门槛的强力装备组合",context:"怪物猎人配装"});
+  f.enable({postingSelectionMode:"ai",postingPrompt:"分享个人心得"});f.advance(60000);await f.worker.tick();
+  assert.equal(f.inputs[0].input.kind,"post-select");assert.equal(f.inputs[0].input.slang,undefined);
+  assert.equal(f.inputs[1].input.kind,"post");assert.equal(f.inputs[1].input.slang[0].term,"轮椅");
+});
+
+test("posting glossary is bounded and matches topic, hashtag and Latin word boundaries",()=>{
+  const entries=Array.from({length:25},(_,i)=>({term:"词语"+i,meaning:"省操作的装备组合",context:"游戏配装",verified:true,status:"active",updatedAt:i}));
+  const result=postingSlang({entries},{topic:"配装心得，聊聊词语0"});
+  assert.equal(result.length,20);assert.equal(result[0].term,"词语0");
+  const op={term:"OP",meaning:"过于强大",context:"强度平衡",verified:true,status:"active",updatedAt:1};
+  assert.deepEqual(postingSlang({entries:[op]},{topic:"hope"}),[]);
+  assert.equal(postingSlang({entries:[op]},{topic:"角色讨论",hashtags:[{name:"强度平衡"}]}).length,1);
+});
 
 test("posting config validates complete independent persona and schedule", () => {
   for (const patch of [{ postingEnabled: "true" }, { postingPersona: 1 }, { postingPrompt: "x".repeat(4001) }, { postingTopicId: "1x" }, { postingTime: "24:00" }, { postingAt: "2026-02-30T12:00" }, { postingWeekdays: [1, 1] }, { postingSchedule: "hourly" }]) assert.throws(() => validateConfig(patch));
