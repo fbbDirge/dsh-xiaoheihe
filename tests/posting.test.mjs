@@ -523,3 +523,63 @@ test("legacy conflicting manual targets load safely but cannot submit; AI ignore
     if (mode === "manual") assert.match(next.status().posting.jobs[0].error, /只能单独选择/);
   }
 });
+
+const postNow=(worker,account,requestId="manual-request-1")=>worker.run("post",{manual:true,accountId:account.id,requestId});
+
+test("manual posting executes immediately without browsing, preserves schedule and deduplicates after restart",async t=>{
+  const f=fixture(t);f.enable({postingDailyLimit:3});
+  const next=f.worker.status().posting.nextAt;
+  assert.equal(f.worker.data.config.enabled,false);
+  await postNow(f.worker,f.account);
+  assert.equal(f.sent.length,1);assert.equal(f.inputs[0].input.kind,"post");
+  assert.equal(f.inputs[0].config.postingPersona,"POST_PERSONA");
+  assert.equal(f.worker.status().posting.nextAt,next);
+  assert.equal(f.worker.status().posting.jobs[0].trigger,"manual");
+  assert.equal(f.worker.status().posting.jobs[0].status,"verified");
+  const restarted=f.create();await postNow(restarted,f.account);
+  assert.equal(f.sent.length,1);
+  f.advance(60000);await restarted.tick();
+  assert.equal(f.sent.length,2,"the original fixed schedule is preserved");
+});
+
+test("manual posting bypasses prompt scheduling but respects daily task caps and send intervals",async t=>{
+  const f=fixture(t);f.enable({...promptConfig,postingDailyLimit:2});
+  await postNow(f.worker,f.account);
+  assert.deepEqual(f.inputs.map(v=>v.input.kind),["post"]);
+  assert.throws(()=>postNow(f.worker,f.account,"manual-request-2"),/不足 60 分钟/);
+  assert.ok(!fs.existsSync(f.worker.lockFile));
+  f.advance(3600000);await postNow(f.worker,f.account,"manual-request-2");
+  f.advance(3600000);assert.throws(()=>postNow(f.worker,f.account,"manual-request-3"),/已达上限/);
+  assert.equal(f.sent.length,2);assert.equal(f.worker.status().posting.jobs.length,2);
+});
+
+test("manual posting recovers the same queued job after generation failure and restart",async t=>{
+  let attempts=0;
+  const f=fixture(t,{generate:async()=>{if(++attempts===1)throw new Error("model temporary");return {action:"send",title:"游戏设计",text:"关卡设计可以更有趣。"};}});
+  f.enable({postingTime:"23:00"});
+  await postNow(f.worker,f.account);
+  assert.equal(f.worker.status().posting.jobs[0].status,"pending");
+  const restarted=f.create();f.advance(60000);await restarted.tick();
+  assert.equal(f.sent.length,1);assert.equal(restarted.status().posting.jobs.length,1);
+  assert.equal(restarted.status().posting.jobs[0].status,"verified");
+  assert.equal(restarted.status().posting.nextAt,at("2026-10-29T23:00:00"));
+});
+
+test("manual posting rejects disabled, stale-account, duplicate in-flight and unscheduled extra requests",async t=>{
+  let release;
+  const f=fixture(t,{generate:()=>new Promise(resolve=>{release=resolve;})});
+  assert.throws(()=>postNow(f.worker,f.account),/开启定时发帖/);
+  f.enable();assert.throws(()=>postNow(f.worker,{id:"8"}),/账号已切换/);
+  assert.throws(()=>postNow(f.worker,f.account,"bad"),/请求标识/);
+  assert.ok(!fs.existsSync(f.worker.lockFile));
+  const task=postNow(f.worker,f.account);assert.throws(()=>postNow(f.worker,f.account),/任务正在运行/);
+  f.worker.configure({postingEnabled:false});release({action:"send",title:"标题",text:"停止后不发送"});await task;
+  assert.equal(f.sent.length,0);assert.equal(f.worker.status().posting.jobs[0].status,"pending");
+});
+
+test("manual posting uncertain outcomes are never retried by repeated requests or ticks",async t=>{
+  const f=fixture(t,{sendError:new Error("network disconnected")});f.enable({postingTime:"23:00"});
+  await postNow(f.worker,f.account);assert.equal(f.worker.status().posting.jobs[0].status,"uncertain");
+  const restarted=f.create();await postNow(restarted,f.account);f.advance(60000);await restarted.tick();
+  assert.equal(f.sent.length,1);
+});

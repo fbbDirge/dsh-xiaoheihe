@@ -41,7 +41,7 @@ global.fetch = async (url, options) => {
     if (failSave) return { ok: false, status: 409, json: async () => ({ ok: false, error: "配置保存失败" }) };
     server = { ...server, config: { ...server.config, ...body.config } };
   }
-  if (body?.action === "run") server = { ...server, busy: true };
+  if (body?.action === "run" || body?.action === "post-now") server = { ...server, busy: true };
   if (body?.action === "login") account = { ...account, loggedIn: true };
   if (body?.action === "logout") account = { ...account, loggedIn: false };
   return { ok: true, status: 200, json: async () => structuredClone(url.endsWith("state") ? account : server) };
@@ -237,7 +237,18 @@ try {
   assert.equal(control(page.render(), "通用人设与兴趣").props.value, "从 JSON 修改");
   assert.equal(typeof server.config.postsPerRound, "number");
   assert.deepEqual(server.config.valleyWindows, defaults.valleyWindows);
-  assert.equal(button(page.render(), "立即执行一轮").props.disabled, false);
+  assert.equal(button(page.render(), "立即浏览一轮").props.disabled, false);
+  assert.equal(button(page.render(), "立即发帖").props.disabled,true);
+  server.config.postingEnabled=true;server.posting={accountMatches:true,jobs:[]};await poll();
+  assert.equal(button(page.render(), "立即发帖").props.disabled,false);
+  await button(page.render(), "立即发帖").props.onClick();
+  const manual=requests.filter(r=>r.body?.action === "post-now").at(-1).body;
+  assert.equal(manual.accountId,"123");assert.match(manual.requestId,/^manual-/);
+  assert.equal(button(page.render(), "立即发帖").props.disabled,true);
+  server.busy=false;server.config.enabled=false;server.config.autoReply=false;await poll();
+  assert.equal(button(page.render(), "停止全部任务").props.disabled,false,"posting-only automation can be stopped");
+  server.config.enabled=true;await poll();
+
 
   button(page.render(), "运行时段").props.onClick();
   button(page.render(), "峰底快捷方案").props.onClick();
@@ -268,7 +279,7 @@ try {
   await poll();
   assert.ok(text(page.render()).includes("配置保存失败"), "successful polls do not hide action errors");
   failSave = false;
-  await button(page.render(), "立即执行一轮").props.onClick();
+  await button(page.render(), "立即浏览一轮").props.onClick();
   assert.equal(button(page.render(), "保存设置").props.disabled, true);
   await button(page.render(), "停止全部任务").props.onClick();
   assert.deepEqual(requests.filter((r) => r.body?.action === "configure").at(-1).body.config, { enabled: false, autoReply: false, postingEnabled: false });
