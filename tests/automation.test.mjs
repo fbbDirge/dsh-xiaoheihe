@@ -23,6 +23,9 @@ function fixture(t, overrides = {}) {
 }
 
 test("configuration rejects coercion, unknown fields and invalid windows",()=>{
+  assert.equal(defaults.replyMaxAttempts,5);
+  for(const value of [1,5,100]) assert.equal(validateConfig({replyMaxAttempts:value}).replyMaxAttempts,value);
+  for(const value of [0,-1,101,1.5,"5",null]) assert.throws(()=>validateConfig({replyMaxAttempts:value}));
   for(const key of ["dailyComments","dailyReplies"]) {
     for(const value of [0,101,9999]) assert.equal(validateConfig({[key]:value})[key],value);
     for(const value of [-1,10000,1.5,"9999",null]) assert.throws(()=>validateConfig({[key]:value}));
@@ -701,5 +704,117 @@ test('own-post rejected sends retry, unknown outcomes never auto resend', async 
     await f.worker.run('reply');
     assert.equal(attempts, definitive ? 2 : 1);
     assert.equal(f.worker.status().replyQueue.length, definitive ? 0 : 1);
+  }
+});
+
+test("reply generation failures stop at the configured limit and unread messages never recreate the job",async t=>{
+  let generations=0;
+  const {worker,sent}=replyFixture(t,{generate:async()=>{generations++;throw new Error("model failed");}});
+  worker.configure({autoReply:true,replyMaxAttempts:3});
+  for(let i=1;i<=3;i++){
+    await worker.run("reply");
+    assert.equal(generations,i);
+    assert.equal(worker.status().replyQueue.length,i<3 ? 1 : 0);
+  }
+  const record=worker.status().interactions.find(v=>v.replyId === "91");
+  assert.equal(record.status,"exhausted");assert.equal(record.attempts,3);assert.equal(record.retryLimit,3);
+  assert.match(record.error,/model failed/);assert.equal(worker.status().replyExhaustedCount,1);
+  await worker.run("reply");assert.equal(generations,3);assert.equal(sent.length,0);
+  assert.equal(worker.status().usage.reply,0);
+});
+
+test("missing comment relationships and inaccessible posts have bounded lookup attempts",async t=>{
+  for(const mode of ["missing","unavailable"]){
+    const {worker,sent}=replyFixture(t);const read=worker.api;let lookups=0;
+    worker.api=async(...args)=>{
+      if(args[1].endsWith('/tree')){
+        lookups++;
+        if(mode === "unavailable")throw new Error("该内容暂不可查看");
+        return {result:{link:{linkid:1},comments:[]}};
+      }
+      return read(...args);
+    };
+    worker.configure({autoReply:true,replyMaxAttempts:2});
+    for(let i=0;i<4;i++)await worker.run("reply");
+    assert.equal(lookups,2);assert.equal(sent.length,0);assert.equal(worker.status().replyQueue.length,0);
+    assert.equal(worker.status().interactions[0].status,"exhausted");
+    assert.ok(!worker.status().interactions[0].error.includes("下轮重试"));
+  }
+});
+
+test("definitive reply rejections stop at the limit while retaining submitted text and receipt diagnostics",async t=>{
+  const {worker}=replyFixture(t);const read=worker.api;let sends=0;
+  worker.api=async(...args)=>{
+    if(args[3] === "POST"){sends++;throw Object.assign(new Error("platform rejection"),{definitive:true,httpStatus:200,platformStatus:"failed",platformMessage:"不可回复"});}
+    return read(...args);
+  };
+  worker.configure({autoReply:true,replyMaxAttempts:2});
+  for(let i=0;i<4;i++)await worker.run("reply");
+  assert.equal(sends,2);assert.equal(worker.status().usage.reply,2);assert.equal(worker.status().replyQueue.length,0);
+  const record=worker.status().interactions[0];assert.equal(record.status,"exhausted");
+  assert.ok(record.text);assert.equal(record.httpStatus,200);assert.equal(record.platformMessage,"不可回复");
+});
+
+test("legacy high-attempt queues retire without I/O, preserve uncertain sends and remain stopped after restart",async t=>{
+  const {worker,account,directory,sent}=replyFixture(t);const read=worker.api;let lookups=0;
+  worker.api=async(...args)=>{if(args[1].endsWith('/tree'))lookups++;return read(...args);};
+  worker.configure({autoReply:true,dailyReplies:0});
+  const a=worker.data.accounts[account.id];
+  a.replyQueue={
+    91:{replyId:"91",postId:"1",rootId:"90",attempts:2634,queuedAt:1,error:"暂未找到完整评论关系，下轮重试"},
+    92:{replyId:"92",postId:"1",rootId:"90",attempts:2045,queuedAt:2,error:"发送结果未知"},
+  };
+  a.actions['reply:92']={status:"unknown",kind:"reply",postId:"1",replyId:"92",at:2,text:"待核实的旧回复"};worker.save();
+  const config=JSON.parse(fs.readFileSync(worker.configFile,"utf8"));delete config.replyMaxAttempts;fs.writeFileSync(worker.configFile,JSON.stringify(config));
+  const before=fs.readFileSync(worker.file,"utf8");
+  const create=()=>new Automation({directory,account:()=>account,api:worker.api,generate:worker.generate,now:worker.now,wait:worker.wait});
+  const next=create();
+  assert.equal(next.status().config.replyMaxAttempts,5);
+  assert.equal(fs.readFileSync(worker.file,"utf8"),before,"read-only reload must not overwrite an active host's state");
+  assert.equal(next.status().interactions.find(v=>v.replyId === "91").status,"exhausted");
+  assert.equal(next.status().replyQueue.length,1);assert.equal(next.status().replyQueue[0].state,"uncertain");
+  await next.run("reply");assert.equal(lookups,0);assert.equal(sent.length,0);
+  assert.equal(JSON.parse(fs.readFileSync(worker.file,"utf8")).accounts[account.id].actions['reply:91'].attempts,2634);
+  next.configure({replyMaxAttempts:100,autoReply:false});next.configure({autoReply:true});
+  const restored=create();await restored.run("reply");
+  assert.equal(restored.status().replyExhaustedCount,1);assert.equal(lookups,0);
+  account.id="9";assert.equal(restored.status().replyExhaustedCount,0);assert.equal(restored.status().replyQueue.length,0);
+});
+
+test("exhausted entries do not consume per-round slots or starve fresh replies",async t=>{
+  const {worker,sent}=replyFixture(t);const read=worker.api;
+  worker.configure({autoReply:true,repliesPerRound:1,replyMaxAttempts:2});
+  const a=worker.data.accounts[7];
+  a.replyQueue={91:{replyId:"91",postId:"1",rootId:"90",attempts:2,queuedAt:1,error:"旧失败"}};worker.save();
+  worker.api=async(...args)=>{
+    if(args[1].endsWith('/message'))return {result:{messages:[91,92].map(id=>({comment_a_id:id,root_comment_id:90,linkid:1,is_unread:1}))}};
+    if(args[1].endsWith('/tree')){const tree=await read(...args);tree.result.comments[0].comment.push({commentid:92,reply_id:90,user:{userid:8},text:"新问题"});return tree;}
+    return read(...args);
+  };
+  await worker.run("reply");
+  assert.equal(sent.length,1);assert.equal(sent[0].reply_id,"92");assert.equal(worker.status().replyQueue.length,0);
+  assert.equal(worker.status().replyExhaustedCount,1);
+});
+
+test("lowering the reply limit retires existing failures immediately without reviving them when raised",async t=>{
+  const {worker,sent}=replyFixture(t,{generate:async()=>{throw new Error("failed");}});
+  worker.configure({autoReply:true,replyMaxAttempts:5});
+  for(let i=0;i<3;i++)await worker.run("reply");
+  assert.equal(worker.status().replyQueue.length,1);
+  const status=worker.configure({replyMaxAttempts:2});
+  assert.equal(status.replyQueue.length,0);assert.equal(status.replyExhaustedCount,1);
+  worker.configure({replyMaxAttempts:10});worker.generate=async()=>({action:"send",text:"不应恢复"});
+  await worker.run("reply");assert.equal(sent.length,0);
+});
+
+test("uncertain last sends stay reserved, and a successful final attempt is never marked exhausted",async t=>{
+  for(const mode of ["unknown","success"]){
+    const {worker,sent}=replyFixture(t);const read=worker.api;
+    worker.api=async(...args)=>{if(mode === "unknown" && args[3] === "POST")throw new Error("timeout");return read(...args);};
+    worker.configure({autoReply:true,replyMaxAttempts:1});
+    await worker.run("reply");await worker.run("reply");
+    assert.equal(worker.status().replyExhaustedCount,0);
+    if(mode === "unknown"){assert.equal(worker.status().replyQueue[0].state,"uncertain");assert.equal(sent.length,0);}
+    else {assert.equal(worker.status().replyQueue.length,0);assert.equal(sent.length,1);assert.equal(worker.status().interactions[0].status,"sent");}
   }
 });

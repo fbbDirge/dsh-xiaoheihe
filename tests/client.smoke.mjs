@@ -190,6 +190,9 @@ try {
   tree = page.render();
   control(tree, "每轮最多浏览帖子数").props.onChange({ target: { value: "3" } });
   button(page.render(), "互动").props.onClick();
+  assert.equal(control(page.render(),"单条来信最多尝试次数").props.value,5);
+  assert.equal(control(page.render(),"单条来信最多尝试次数").props.max,100);
+  control(page.render(),"单条来信最多尝试次数").props.onChange({target:{value:"3"}});
   control(page.render(), "回复检查间隔（秒）").props.onChange({ target: { value: "45" } });
   control(page.render(), "回复跟随浏览运行时段").props.onChange({ target: { checked: true } });
   control(page.render(), "回复人格").props.onChange({ target: { value: "认真倾听\n简洁回答" } });
@@ -215,6 +218,7 @@ try {
   assert.equal(server.config.enabled, true);
   assert.equal(server.config.postsPerRound, 3);
   assert.equal(server.config.replyIntervalSeconds, 45);
+  assert.equal(server.config.replyMaxAttempts,3);
   assert.equal(server.config.replyFollowSchedule, true);
   assert.equal(server.config.replyPersona, "认真倾听\n简洁回答");
   assert.equal(server.config.mentionName, "@指定用户");
@@ -276,6 +280,7 @@ try {
   server.interactions = [
     { at: Date.now(), kind: "comment", status: "sent", postId: "1", text: '<a data-user-id="8">@作者</a> 测试评论正文', displayText: "@作者 测试评论正文" },
     { at: Date.now(), kind: "reply", status: "rejected", platformStatus: "failed", platformMessage: "缺失参数 <script>test</script>", httpStatus: 200, postId: "2", text: "测试回复正文", incoming: "对方的问题" },
+    { at: Date.now(), kind:"reply",status:"exhausted",postId:"3",replyId:"93",attempts:2634,retryLimit:5,error:"暂未找到完整评论关系" },
   ];
   server.replyQueue = [
     { at: Date.now(), replyId: "91", postId: "2", attempts: 2, state: "pending", error: "模型失败 <script>test</script>" },
@@ -286,6 +291,9 @@ try {
   assert.ok(text(page.render()).includes("待回复队列"));
   assert.ok(text(page.render()).includes("模型失败 <script>test</script>"));
   assert.ok(text(page.render()).includes("待确认，不自动重发"));
+  assert.ok(text(page.render()).includes("已达尝试上限，停止自动回复"));
+  assert.ok(text(page.render()).includes("已尝试 2634 次 · 上限 5 次"));
+  assert.ok(text(page.render()).includes("最近原因：暂未找到完整评论关系"));
   assert.equal(all(page.render()).some(n => n.props?.dangerouslySetInnerHTML), false);
   assert.ok(text(page.render()).includes("@作者 测试评论正文"));
   assert.ok(!text(page.render()).includes("data-user-id"));
