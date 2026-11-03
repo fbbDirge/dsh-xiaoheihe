@@ -108,6 +108,7 @@ try {
   assert.equal(tabs.filter((n) => n.props["aria-selected"]).length, 1);
   button(tree,"黑话").props.onClick();
   assert.equal(control(page.render(),"发帖与回复时参考黑话词库").props.checked,true);
+  assert.equal(control(page.render(),"释义研究方式").props.value,"context");
   assert.equal(control(page.render(),"自动从帖子和评论学习").props.checked,false);
   control(page.render(),"自动从帖子和评论学习").props.onChange({target:{checked:true}});
   control(page.render(),"黑话词语").props.onChange({target:{value:"轮椅"}});

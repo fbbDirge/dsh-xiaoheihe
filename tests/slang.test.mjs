@@ -7,7 +7,7 @@ import { Readable } from "node:stream";
 import { Automation, defaults, validateConfig } from "../lib/automation.js";
 import { decisionMessages, generateDecision } from "../lib/generator.js";
 import { forumText } from "../lib/forum-text.js";
-import { parseSlangDecision, slangState, learnSlang, relevantSlang, updateSlang, updateSlangBatch, researchSources, applySlangResearch, searchSlang } from "../lib/slang.js";
+import { parseSlangDecision, slangState, learnSlang, relevantSlang, updateSlang, updateSlangBatch, researchSources, applySlangResearch, applySlangExplanation, parseSlangExplanation, slangResearchFailure, searchSlang } from "../lib/slang.js";
 
 const candidate = { term:"轮椅", meaning:"操作门槛低且强度高的配装，并非真实代步工具", context:"此处指游戏配装讨论，其他语境需重新判断", evidence:"这套配装真是轮椅", confidence:0.95 };
 const input = { post:{title:"配装体验",body:"这套配装真是轮椅"} };
@@ -192,6 +192,9 @@ test("DSH slang extraction uses structured parser and guarded prompt", async t =
   fs.writeFileSync(entry,`process.stdout.write(${JSON.stringify(JSON.stringify(researchDecision))});`);
   const research=await generateDecision({kind:"slang-research",term:"轮椅"},{...defaults,nodePath:process.execPath,dshCommand:entry},{directory,signal:new AbortController().signal});
   assert.equal(research.sourceUrls[0],webSources[0].url);
+  const explanation=await generateDecision({kind:"slang-explain",term:"轮椅"},{...defaults,nodePath:process.execPath,dshCommand:entry},{directory,signal:new AbortController().signal});
+  assert.equal(explanation.meaning,candidate.meaning);
+  assert.deepEqual(explanation.sourceUrls,[]);
   const prompt=decisionMessages({kind:"reply",...input},defaults)[0].content;
   assert.ok(prompt.includes("usable=false"));
   assert.ok(prompt.includes("skip"));
@@ -279,6 +282,7 @@ const researchDecision={meaning:candidate.meaning,context:candidate.context,conf
 test("host search precedes model research; citations persist but only confirmation enables reply meanings",async t=>{
   const calls=[];
   const {worker,account,sent}=fixture(t,async payload=>{calls.push(payload);return researchDecision;});
+  worker.configure({slangResearchMode:"web"});
   worker.search=async(request,signal)=>{assert.ok(!signal.aborted);assert.ok(request.query.includes("轮椅"));assert.ok(!request.query.includes(account.cookie));return {sources:webSources};};
   const id=seedCandidate(worker,account);
   assert.equal(worker.runSlang({action:"research",accountId:account.id,ids:[id]}).runningKind,"slang");
@@ -296,6 +300,7 @@ test("host search precedes model research; citations persist but only confirmati
 test("research failure, missing search sources and fabricated citations never confirm or leak diagnostics",async t=>{
   for(const mode of ["unavailable","empty","citation","model-error"]){
     const {worker,account,sent}=fixture(t,async()=>{if(mode === "model-error")throw new Error("private upstream diagnostic");return {...researchDecision,sourceUrls:["https://invented.example/false"]};});
+    worker.configure({slangResearchMode:"web"});
     const id=seedCandidate(worker,account);
     worker.search=async()=>{if(mode === "unavailable")throw new Error("secret-provider-key");return {sources:mode === "empty" ? [] : webSources};};
     worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
@@ -309,6 +314,7 @@ test("cancel or account switch during search discards research; a stopped provid
   for(const changeAccount of [false,true]){
     let resolve;let generated=0;
     const {worker,account}=fixture(t,async()=>{generated++;return researchDecision;});
+    worker.configure({slangResearchMode:"web"});
     worker.search=()=>new Promise(done=>{resolve=done;});
     const id=seedCandidate(worker,account);
     worker.runSlang({action:"research",accountId:account.id,ids:[id]});
@@ -330,4 +336,45 @@ test("research sources reject unsafe links and model citations must be in actual
   assert.throws(()=>applySlangResearch(entry,{...researchDecision,sourceUrls:["https://invented.example"]},sources,1),/之外/);
   assert.equal(entry.meaning,undefined);
   applySlangResearch(entry,researchDecision,sources,2);assert.equal(entry.verified,false);
+});
+
+test("default context explanation uses the selected model without a search credential and stays unverified",async t=>{
+  const calls=[];
+  const {worker,account,sent}=fixture(t,async payload=>{calls.push(payload);return {meaning:candidate.meaning,context:candidate.context,confidence:0.8};});
+  assert.equal(defaults.slangResearchMode,"context");
+  assert.throws(()=>validateConfig({slangResearchMode:"third-party"}),/研究方式/);
+  worker.search=async()=>{throw new Error("search must not run in context mode");};
+  const id=seedCandidate(worker,account);
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
+  assert.deepEqual(calls.map(v=>v.kind),["slang-explain"]);
+  const entry=worker.status().slang.entries[0];
+  assert.equal(entry.meaning,candidate.meaning);assert.equal(entry.research.mode,"context");
+  assert.equal(entry.status,"pending");assert.equal(entry.verified,false);assert.deepEqual(entry.research.sources,[]);
+  assert.equal(relevantSlang(slangState(worker.data.accounts[account.id]),input)[0].meaning,undefined);
+  assert.equal(sent.length,0);
+  const prompt=decisionMessages(calls[0],defaults)[0].content;
+  assert.ok(prompt.includes("没有进行联网检索"));assert.ok(prompt.includes("不调用工具"));
+});
+
+test("missing search credentials produce actionable safe diagnostics instead of blaming the model",async t=>{
+  const {worker,account}=fixture(t,async()=>{throw new Error("model must not be called");});
+  worker.configure({slangResearchMode:"web"});
+  worker.search=async()=>{throw Object.assign(new Error("private upstream token=do-not-print"),{code:"WEB_PROVIDER_CREDENTIAL_MISSING"});};
+  const id=seedCandidate(worker,account);
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
+  const failure=worker.status().slang.entries[0].research;
+  assert.equal(failure.code,"WEB_PROVIDER_CREDENTIAL_MISSING");assert.equal(failure.stage,"search");
+  assert.ok(failure.error.includes("DEEPSEEK_API_KEY"));assert.ok(failure.error.includes("当前模型解析"));
+  assert.ok(!JSON.stringify(worker.status()).includes("do-not-print"));
+  const modelFailure=slangResearchFailure(new Error("private model response"),"generation");
+  assert.equal(modelFailure.code,"SLANG_MODEL_FAILED");assert.ok(!modelFailure.error.includes("private"));
+});
+
+test("context guesses cannot retain fabricated citations and insufficient context remains pending",()=>{
+  assert.deepEqual(parseSlangExplanation(JSON.stringify(researchDecision)).sourceUrls,[]);
+  const entry={verified:false,status:"pending"};
+  assert.throws(()=>applySlangExplanation(entry,{meaning:"",context:"",confidence:0},1),/不足/);
+  assert.equal(entry.meaning,undefined);
+  applySlangExplanation(entry,researchDecision,2);
+  assert.deepEqual(entry.research.sources,[]);assert.equal(entry.research.mode,"context");assert.equal(entry.verified,false);
 });
