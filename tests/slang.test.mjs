@@ -398,7 +398,7 @@ test("slang conversations reuse across batches and restarts, rotate exactly at c
   assert.notEqual(calls[3].id,calls[2].id);assert.equal(calls[3].resume,false);
 });
 
-test("slang cap changes, failed generations and research mode switches start a clean session",async t=>{
+test("slang failures and research mode switches keep the conversation until its cap",async t=>{
   const calls=[];let fail=false;
   const {worker,account}=fixture(t,async(_input,_config,options)=>{
     const persisted=JSON.parse(fs.readFileSync(worker.file)).accounts[account.id].slang.conversation;
@@ -410,11 +410,11 @@ test("slang cap changes, failed generations and research mode switches start a c
   await run();worker.configure({slangSessionTerms:1});await run();
   assert.notEqual(calls[0].id,calls[1].id);
   worker.configure({slangSessionTerms:20});fail=true;await run();assert.equal(calls[2].id,calls[1].id);
-  fail=false;await run();assert.notEqual(calls[3].id,calls[2].id);
+  fail=false;await run();assert.equal(calls[3].id,calls[2].id);assert.equal(calls[3].resume,true);
   worker.configure({slangResearchMode:"web"});worker.search=async()=>({sources:webSources});await run();
-  assert.notEqual(calls[4].id,calls[3].id);
+  assert.equal(calls[4].id,calls[3].id);
   worker.search=async()=>{throw new Error("search down");};await run();
-  assert.equal(calls.length,5);assert.equal(worker.data.accounts[account.id].slang.conversation.used,1);
+  assert.equal(calls.length,5);assert.equal(worker.data.accounts[account.id].slang.conversation.used,4);
 });
 
 test("external slang calls do not allocate DSH conversations",async t=>{
@@ -442,4 +442,25 @@ test("selected batches exceed twenty and rotate conversations only at the config
   assert.deepEqual(calls.map((v,i)=>!v.resume?i:null).filter(v=>v!==null),[0,20,40]);
   assert.notEqual(calls[0].id,state.conversation.id);
   assert.ok(worker.status().slang.entries.every(v=>v.research.status === "done" && !v.verified));
+});
+
+test("bulk explanation errors and restart never rotate a conversation below its cap",async t=>{
+  const calls=[];
+  const generate=async(input,_config,options)=>{
+    calls.push({term:input.term,...options.session});
+    if([1,3,5].includes(calls.length))return parseSlangExplanation('invalid JSON');
+    return researchDecision;
+  };
+  const f=fixture(t,generate);let worker=f.worker;
+  worker.configure({slangSessionTerms:3});
+  const state=slangState(worker.accountState(f.account));
+  state.entries=Array.from({length:6},(_,i)=>({id:'failed-bulk-'+i,term:'测试词'+i,status:'pending',verified:false,sources:[]}));worker.save();
+  worker.runSlang({action:'research',accountId:f.account.id,ids:['failed-bulk-0']});await worker.running;
+  assert.equal(worker.data.accounts[f.account.id].slang.conversation.ready,false);
+  worker=new Automation({directory:f.directory,account:()=>f.account,generate});
+  worker.runSlang({action:'research',accountId:f.account.id,ids:state.entries.slice(1).map(v=>v.id)});await worker.running;
+  assert.equal(calls.length,6);assert.equal(worker.status().slang.task.done,5);assert.equal(worker.status().slang.task.failed,2);
+  assert.equal(new Set(calls.slice(0,3).map(v=>v.id)).size,1);assert.equal(new Set(calls.slice(3).map(v=>v.id)).size,1);
+  assert.notEqual(calls[2].id,calls[3].id);assert.deepEqual(calls.map(v=>v.resume),[false,true,true,false,true,true]);
+  assert.ok(worker.status().slang.entries.every(v=>!v.verified));
 });

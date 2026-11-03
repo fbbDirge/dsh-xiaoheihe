@@ -171,7 +171,7 @@ test("slang runner resumes the owned session and returns only the current turn a
       events.push({seq:4,type:"turn/start"},...(completed?[{seq:5,type:"assistant/message",data:{message:{content:[{type:"text",text:"new meaning"}]}}}]:[]),{seq:completed?6:5,type:"turn/end",data:{reason:{kind:completed?"completed":"error"}}});
     }};
     if(modern){const follow=agent.followup;agent.followup=message=>{follow(message);session.seq=completed?7:6;};}
-    const services={loader:{await:async()=>{}},agentDefaultModel:{currentSelection:()=>({provider:"p",model:"m"})},sessions:{flush:async()=>{flushed=true;}},agents:{create:async options=>{calls.push(["create",options]);return {agent};},resume:async options=>{calls.push(["resume",options]);return {agent};}}};
+    const services={sessionPersistence:{},sessionQuery:modern?{observeSession:async()=>({header:{id,cwd:process.cwd()},[Symbol.dispose]:()=>{}})}:{readSession:async()=>({session:{id,cwd:process.cwd()}})},loader:{await:async()=>{}},agentDefaultModel:{currentSelection:()=>({provider:"p",model:"m"})},sessions:{flush:async()=>{flushed=true;}},agents:{create:async options=>{calls.push(["create",options]);return {agent};},resume:async options=>{calls.push(["resume",options]);return {agent};}}};
     await runSlangTurn({get:key=>services[key]},{sessionId:id,resume,task:"current term"},{installModelSelection:()=>({current:{provider:"p",model:"m"}}),createUserMessage:value=>value},{stdout:{write:value=>{assert.equal(flushed,true);stdout+=value;}},stderr:{write:()=>{}},exit:value=>{code=value;}});
     assert.equal(calls[0][1].setup({}),undefined,"agent setup must not return a model-selection object as a commit hook");
     assert.equal(calls[0][0],resume?"resume":"create");assert.equal(calls[0][1][resume?"resumeSessionId":"sessionId"],id);
@@ -187,5 +187,23 @@ test("successful JSON without the exact durable session acknowledgement is refus
   for(const ack of ["","heybox-session-saved:session-wrong\n"]){
     fs.writeFileSync(entry,`process.stderr.write(${JSON.stringify(ack)});process.stdout.write('{"meaning":"示例释义","context":"游戏语境","confidence":0.8}');`);
     await assert.rejects(generateDecision({kind:"slang-explain",term:"轮椅"},{...defaults,nodePath:process.execPath,dshCommand:entry},{directory,session,signal:new AbortController().signal}),/未确认保存到指定黑话对话/);
+  }
+});
+
+test("slang recovery creates only a proven-missing owned session and fails closed on read errors",async()=>{
+  const {runSlangTurn}=await import('../lib/slang-runner.js');
+  const id='session-heybox-slang-00000000-0000-0000-0000-000000000009';
+  for(const modern of [false,true])for(const outcome of ['missing','corrupt','wrong-owner']){
+    let created=0,disposed=0;
+    const lookup=async()=>{
+      if(outcome==='wrong-owner')return modern?{header:{id,cwd:'/unrelated'},[Symbol.dispose]:()=>disposed++}:{session:{id,cwd:'/unrelated'}};
+      throw Object.assign(new Error('unavailable'),{code:outcome==='missing'?'SESSION_QUERY_SESSION_NOT_FOUND':'SESSION_QUERY_LOG_CORRUPT'});
+    };
+    const session={id,seq:0,events:[]};
+    const agent={session,whenIdle:async()=>{},followup:()=>{session.events=[{seq:0,type:'turn/start'},{seq:1,type:'assistant/message',data:{message:{content:[{type:'text',text:'new meaning'}]}}},{seq:2,type:'turn/end',data:{reason:{kind:'completed'}}}];session.seq=3;}};
+    const services={sessionPersistence:{},sessionQuery:modern?{observeSession:lookup}:{readSession:lookup},loader:{await:async()=>{}},agentDefaultModel:{currentSelection:()=>({provider:'p',model:'m'})},sessions:{flush:async()=>{}},agents:{create:async options=>{assert.equal(options.sessionId,id);created++;return {agent};},resume:async()=>{throw new Error('unexpected resume');}}};
+    const run=()=>runSlangTurn({get:key=>services[key]},{sessionId:id,resume:true,task:'term'},{installModelSelection:()=>{},createUserMessage:v=>v},{stdout:{write:()=>{}},stderr:{write:()=>{}},exit:code=>assert.equal(code,0)});
+    if(outcome==='missing'){await run();assert.equal(created,1);}else{await assert.rejects(run());assert.equal(created,0);}
+    assert.equal(disposed,modern&&outcome==='wrong-owner'?1:0);
   }
 });
