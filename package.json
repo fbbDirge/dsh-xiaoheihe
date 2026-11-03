@@ -25,6 +25,7 @@
     "screenshots.json"
   ],
   "dsh": {
+    "name": "刷小黑盒",
     "client": {
       "platform": "web",
       "inject": [
