@@ -150,7 +150,7 @@ test("DSH slang continuation uses an owned runner with the mandatory tool guard"
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),"heybox-session-"));
   t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
   const entry=path.join(directory,"fake-dsh.mjs");
-  fs.writeFileSync(entry,`import fs from 'node:fs';fs.copyFileSync(process.argv[5],'overlay.txt');process.stdout.write('{"meaning":"示例释义","context":"游戏语境","confidence":0.8}');`);
+  fs.writeFileSync(entry,`import fs from 'node:fs';fs.copyFileSync(process.argv[5],'overlay.txt');const overlay=fs.readFileSync(process.argv[5],'utf8');if(!overlay.includes('- id: headless-runner\\n  disabled: true')||!overlay.includes('- id: heybox-slang-runner'))process.exit(2);process.stderr.write('heybox-session-saved:session-heybox-slang-00000000-0000-0000-0000-000000000000\\n');process.stdout.write('{"meaning":"示例释义","context":"游戏语境","confidence":0.8}');`);
   const session={id:"session-heybox-slang-00000000-0000-0000-0000-000000000000",resume:true};
   await generateDecision({kind:"slang-explain",term:"轮椅"},{...defaults,nodePath:process.execPath,dshCommand:entry},{directory,session,signal:new AbortController().signal});
   const overlay=fs.readFileSync(path.join(directory,"overlay.txt"),'utf8');
@@ -161,16 +161,31 @@ test("DSH slang continuation uses an owned runner with the mandatory tool guard"
 test("slang runner resumes the owned session and returns only the current turn after flush",async()=>{
   const {runSlangTurn}=await import('../lib/slang-runner.js');
   const id="session-heybox-slang-00000000-0000-0000-0000-000000000000";
-  for(const resume of [false,true])for(const completed of [false,true]){
+  for(const modern of [false,true])for(const resume of [false,true])for(const completed of [false,true]){
     const calls=[];let flushed=false,stdout="",code;
-    const session={seq:4,events:[{seq:1,type:"turn/start"},{seq:2,type:"assistant/message",data:{message:{content:[{type:"text",text:"old wrong term"}]}}},{seq:3,type:"turn/end",data:{reason:{kind:"completed"}}}]};
+    const session={id,seq:4,events:[{seq:1,type:"turn/start"},{seq:2,type:"assistant/message",data:{message:{content:[{type:"text",text:"old wrong term"}]}}},{seq:3,type:"turn/end",data:{reason:{kind:"completed"}}}]};
+    const events=session.events;
+    if(modern){delete session.events;session.eventAt=seq=>events.find(e=>e.seq===seq);}
     const agent={session,whenIdle:async()=>{},followup:message=>{
       assert.equal(message.content[0].text,"current term");
-      session.events.push({seq:4,type:"turn/start"},...(completed?[{seq:5,type:"assistant/message",data:{message:{content:[{type:"text",text:"new meaning"}]}}}]:[]),{seq:6,type:"turn/end",data:{reason:{kind:completed?"completed":"error"}}});
+      events.push({seq:4,type:"turn/start"},...(completed?[{seq:5,type:"assistant/message",data:{message:{content:[{type:"text",text:"new meaning"}]}}}]:[]),{seq:completed?6:5,type:"turn/end",data:{reason:{kind:completed?"completed":"error"}}});
     }};
+    if(modern){const follow=agent.followup;agent.followup=message=>{follow(message);session.seq=completed?7:6;};}
     const services={loader:{await:async()=>{}},agentDefaultModel:{currentSelection:()=>({provider:"p",model:"m"})},sessions:{flush:async()=>{flushed=true;}},agents:{create:async options=>{calls.push(["create",options]);return {agent};},resume:async options=>{calls.push(["resume",options]);return {agent};}}};
-    await runSlangTurn({get:key=>services[key]},{sessionId:id,resume,task:"current term"},{installModelSelection:()=>{},createUserMessage:value=>value},{stdout:{write:value=>{assert.equal(flushed,true);stdout+=value;}},stderr:{write:()=>{}},exit:value=>{code=value;}});
+    await runSlangTurn({get:key=>services[key]},{sessionId:id,resume,task:"current term"},{installModelSelection:()=>({current:{provider:"p",model:"m"}}),createUserMessage:value=>value},{stdout:{write:value=>{assert.equal(flushed,true);stdout+=value;}},stderr:{write:()=>{}},exit:value=>{code=value;}});
+    assert.equal(calls[0][1].setup({}),undefined,"agent setup must not return a model-selection object as a commit hook");
     assert.equal(calls[0][0],resume?"resume":"create");assert.equal(calls[0][1][resume?"resumeSessionId":"sessionId"],id);
     assert.equal(stdout,completed?"new meaning\n":"\n");assert.equal(code,completed?0:1);
+  }
+});
+
+test("successful JSON without the exact durable session acknowledgement is refused",async t=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),"heybox-missing-session-"));
+  t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+  const entry=path.join(directory,"fake-dsh.mjs");
+  const session={id:"session-heybox-slang-00000000-0000-0000-0000-000000000000",resume:false};
+  for(const ack of ["","heybox-session-saved:session-wrong\n"]){
+    fs.writeFileSync(entry,`process.stderr.write(${JSON.stringify(ack)});process.stdout.write('{"meaning":"示例释义","context":"游戏语境","confidence":0.8}');`);
+    await assert.rejects(generateDecision({kind:"slang-explain",term:"轮椅"},{...defaults,nodePath:process.execPath,dshCommand:entry},{directory,session,signal:new AbortController().signal}),/未确认保存到指定黑话对话/);
   }
 });

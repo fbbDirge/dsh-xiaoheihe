@@ -108,6 +108,15 @@ try {
   assert.equal(tabs.filter((n) => n.props["aria-selected"]).length, 1);
   button(tree,"黑话").props.onClick();
   assert.equal(control(page.render(),"发帖与回复时参考黑话词库").props.checked,true);
+  server.slang.entries=Array.from({length:75},(_,i)=>({id:"bulk-"+i,term:"黑话"+i,status:"pending",sources:[]}));await poll();
+  control(page.render(),"全选本页黑话").props.onChange({target:{checked:true}});
+  assert.equal(button(page.render(),"解释我勾选的词").props.disabled,false);
+  await button(page.render(),"解释我勾选的词").props.onClick();
+  assert.equal(requests.filter(r=>r.body?.action === "research").at(-1).body.ids.length,50);
+  await button(page.render(),"让 AI 解释全部待处理词（75个）").props.onClick();
+  assert.equal(requests.filter(r=>r.body?.action === "research").at(-1).body.ids.length,75);
+  server.slang.entries=[];await poll();
+
   assert.equal(control(page.render(),"怎么解释这些词").props.value,"context");
   assert.equal(control(page.render(),"一个对话最多解释几个词").props.value,20);
   control(page.render(),"一个对话最多解释几个词").props.onChange({target:{value:"30"}});

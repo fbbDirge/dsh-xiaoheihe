@@ -425,3 +425,21 @@ test("external slang calls do not allocate DSH conversations",async t=>{
   worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
   assert.equal(options.session,undefined);assert.equal(worker.data.accounts[account.id].slang.conversation,undefined);
 });
+
+test("selected batches exceed twenty and rotate conversations only at the configured cap",async t=>{
+  const calls=[];
+  const {worker,account}=fixture(t,async(input,_config,options)=>{calls.push({term:input.term,...options.session});return researchDecision;});
+  worker.configure({slangSessionTerms:20});
+  const state=slangState(worker.accountState(account));
+  state.entries=Array.from({length:51},(_,i)=>({id:"bulk-"+i,term:"测试词"+i,status:"pending",verified:false,sources:[]}));
+  // Old releases wrote this state without actually creating the named DSH session.
+  state.conversation={id:"session-heybox-slang-00000000-0000-0000-0000-000000000000",ready:true,used:1,mode:"slang-explain",launcher:'["dsh",""]'};
+  worker.save();
+  assert.throws(()=>worker.runSlang({action:"research",accountId:account.id,ids:Array.from({length:501},(_,i)=>"bulk-"+i)}),/1–500/);
+  worker.runSlang({action:"research",accountId:account.id,ids:state.entries.map(v=>v.id)});await worker.running;
+  assert.equal(calls.length,51);assert.equal(worker.status().slang.task.done,51);assert.equal(worker.status().slang.task.failed,0);
+  assert.deepEqual([...new Set(calls.map(v=>v.id))].map(id=>calls.filter(v=>v.id===id).length),[20,20,11]);
+  assert.deepEqual(calls.map((v,i)=>!v.resume?i:null).filter(v=>v!==null),[0,20,40]);
+  assert.notEqual(calls[0].id,state.conversation.id);
+  assert.ok(worker.status().slang.entries.every(v=>v.research.status === "done" && !v.verified));
+});
