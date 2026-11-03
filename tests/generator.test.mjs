@@ -145,3 +145,32 @@ test("external API shares personas, isolates credentials and validates output", 
   await assert.rejects(task, /取消/);
   await assert.rejects(generate("reply", { generationTimeoutSeconds: 0.02 }), /超时/);
 });
+
+test("DSH slang continuation uses an owned runner with the mandatory tool guard",async t=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),"heybox-session-"));
+  t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+  const entry=path.join(directory,"fake-dsh.mjs");
+  fs.writeFileSync(entry,`import fs from 'node:fs';fs.copyFileSync(process.argv[5],'overlay.txt');process.stdout.write('{"meaning":"示例释义","context":"游戏语境","confidence":0.8}');`);
+  const session={id:"session-heybox-slang-00000000-0000-0000-0000-000000000000",resume:true};
+  await generateDecision({kind:"slang-explain",term:"轮椅"},{...defaults,nodePath:process.execPath,dshCommand:entry},{directory,session,signal:new AbortController().signal});
+  const overlay=fs.readFileSync(path.join(directory,"overlay.txt"),'utf8');
+  assert.match(overlay,/slang-runner.js/);assert.match(overlay,/heyboxGenerationGuard/);assert.match(overlay,/resume: true/);assert.ok(overlay.includes(session.id));
+  assert.throws(()=>generateDecision({kind:"reply"},defaults,{directory,session,signal:new AbortController().signal}),/参数无效/);
+});
+
+test("slang runner resumes the owned session and returns only the current turn after flush",async()=>{
+  const {runSlangTurn}=await import('../lib/slang-runner.js');
+  const id="session-heybox-slang-00000000-0000-0000-0000-000000000000";
+  for(const resume of [false,true])for(const completed of [false,true]){
+    const calls=[];let flushed=false,stdout="",code;
+    const session={seq:4,events:[{seq:1,type:"turn/start"},{seq:2,type:"assistant/message",data:{message:{content:[{type:"text",text:"old wrong term"}]}}},{seq:3,type:"turn/end",data:{reason:{kind:"completed"}}}]};
+    const agent={session,whenIdle:async()=>{},followup:message=>{
+      assert.equal(message.content[0].text,"current term");
+      session.events.push({seq:4,type:"turn/start"},...(completed?[{seq:5,type:"assistant/message",data:{message:{content:[{type:"text",text:"new meaning"}]}}}]:[]),{seq:6,type:"turn/end",data:{reason:{kind:completed?"completed":"error"}}});
+    }};
+    const services={loader:{await:async()=>{}},agentDefaultModel:{currentSelection:()=>({provider:"p",model:"m"})},sessions:{flush:async()=>{flushed=true;}},agents:{create:async options=>{calls.push(["create",options]);return {agent};},resume:async options=>{calls.push(["resume",options]);return {agent};}}};
+    await runSlangTurn({get:key=>services[key]},{sessionId:id,resume,task:"current term"},{installModelSelection:()=>{},createUserMessage:value=>value},{stdout:{write:value=>{assert.equal(flushed,true);stdout+=value;}},stderr:{write:()=>{}},exit:value=>{code=value;}});
+    assert.equal(calls[0][0],resume?"resume":"create");assert.equal(calls[0][1][resume?"resumeSessionId":"sessionId"],id);
+    assert.equal(stdout,completed?"new meaning\n":"\n");assert.equal(code,completed?0:1);
+  }
+});

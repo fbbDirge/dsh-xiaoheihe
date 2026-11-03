@@ -1,6 +1,6 @@
 {
   "name": "heybox",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "description": "小黑盒 DSH 插件：定时浏览、自动评论与回复、独立人格定时发帖",
   "license": "MIT",
   "repository": {
@@ -51,7 +51,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "check": "node scripts/bomcheck.mjs && node --check lib/platform-error.js && node --check lib/index.js && node --check lib/client.js && node --check lib/posting.js && node --check lib/posting-selections.js && node --check lib/automation.js && node --check lib/forum-text.js && node --check lib/slang.js && node --check lib/generator.js && node --check lib/generation-guard.js && node --check lib/login.js && node --check lib/dependencies.js && node --check scripts/bili-compat.mjs",
+    "check": "node scripts/bomcheck.mjs && node --check lib/platform-error.js && node --check lib/index.js && node --check lib/client.js && node --check lib/posting.js && node --check lib/posting-selections.js && node --check lib/automation.js && node --check lib/forum-text.js && node --check lib/slang.js && node --check lib/slang-runner.js && node --check lib/generator.js && node --check lib/generation-guard.js && node --check lib/login.js && node --check lib/dependencies.js && node --check scripts/bili-compat.mjs",
     "test": "node tests/rewrite.test.mjs && node tests/client.smoke.mjs && node --test tests/automation.test.mjs tests/generator.test.mjs tests/slang.test.mjs tests/login.test.mjs tests/dependencies.test.mjs tests/bili-compat.test.mjs tests/posting.test.mjs tests/posting-selections.test.mjs",
     "prepublishOnly": "npm run check && npm test"
   },

@@ -109,6 +109,8 @@ try {
   button(tree,"黑话").props.onClick();
   assert.equal(control(page.render(),"发帖与回复时参考黑话词库").props.checked,true);
   assert.equal(control(page.render(),"释义研究方式").props.value,"context");
+  assert.equal(control(page.render(),"每个对话最多解析词数").props.value,20);
+  control(page.render(),"每个对话最多解析词数").props.onChange({target:{value:"30"}});
   assert.equal(control(page.render(),"自动从帖子和评论学习").props.checked,false);
   control(page.render(),"自动从帖子和评论学习").props.onChange({target:{checked:true}});
   control(page.render(),"黑话词语").props.onChange({target:{value:"轮椅"}});
@@ -138,6 +140,7 @@ try {
   control(page.render(), "发帖人格").props.onChange({ target: { value: longPersona } });
   await all(page.render()).find(n => n.type === "form").props.onSubmit({ preventDefault() {} });
   assert.equal(server.config.postingPersona, longPersona);
+  assert.equal(server.config.slangSessionTerms,30);
   assert.ok(text(page.render()).includes(longPersona.length + " / 20000"));
   control(page.render(), "发帖人格").props.onChange({ target: { value: "独立写作人格" } });
   control(page.render(), "发帖主题与要求").props.onChange({ target: { value: "讨论关卡设计" } });

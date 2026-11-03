@@ -378,3 +378,50 @@ test("context guesses cannot retain fabricated citations and insufficient contex
   applySlangExplanation(entry,researchDecision,2);
   assert.deepEqual(entry.research.sources,[]);assert.equal(entry.research.mode,"context");assert.equal(entry.verified,false);
 });
+
+test("slang conversations reuse across batches and restarts, rotate exactly at cap, and stay account scoped",async t=>{
+  const calls=[];
+  const generate=async(_input,_config,options)=>{calls.push(structuredClone(options.session));return researchDecision;};
+  const f=fixture(t,generate);let worker=f.worker;
+  assert.equal(defaults.slangSessionTerms,20);
+  for(const value of [0,101,1.5,"20",null])assert.throws(()=>validateConfig({slangSessionTerms:value}));
+  worker.configure({slangSessionTerms:2});
+  const id=seedCandidate(worker,f.account);
+  const run=async()=>{worker.runSlang({action:"research",accountId:f.account.id,ids:[id]});await worker.running;};
+  await run();
+  worker=new Automation({directory:f.directory,account:()=>f.account,api:worker.api,generate});
+  await run();await run();
+  assert.equal(calls[0].resume,false);assert.equal(calls[1].resume,true);
+  assert.equal(calls[0].id,calls[1].id);assert.notEqual(calls[1].id,calls[2].id);assert.equal(calls[2].resume,false);
+  f.account.id="other";const otherId=seedCandidate(worker,f.account);
+  worker.runSlang({action:"research",accountId:f.account.id,ids:[otherId]});await worker.running;
+  assert.notEqual(calls[3].id,calls[2].id);assert.equal(calls[3].resume,false);
+});
+
+test("slang cap changes, failed generations and research mode switches start a clean session",async t=>{
+  const calls=[];let fail=false;
+  const {worker,account}=fixture(t,async(_input,_config,options)=>{
+    const persisted=JSON.parse(fs.readFileSync(worker.file)).accounts[account.id].slang.conversation;
+    assert.equal(persisted.ready,false);assert.equal(persisted.id,options.session.id);
+    calls.push(structuredClone(options.session));if(fail)throw new Error("model unavailable");return researchDecision;
+  });
+  const id=seedCandidate(worker,account);
+  const run=async()=>{worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;};
+  await run();worker.configure({slangSessionTerms:1});await run();
+  assert.notEqual(calls[0].id,calls[1].id);
+  worker.configure({slangSessionTerms:20});fail=true;await run();assert.equal(calls[2].id,calls[1].id);
+  fail=false;await run();assert.notEqual(calls[3].id,calls[2].id);
+  worker.configure({slangResearchMode:"web"});worker.search=async()=>({sources:webSources});await run();
+  assert.notEqual(calls[4].id,calls[3].id);
+  worker.search=async()=>{throw new Error("search down");};await run();
+  assert.equal(calls.length,5);assert.equal(worker.data.accounts[account.id].slang.conversation.used,1);
+});
+
+test("external slang calls do not allocate DSH conversations",async t=>{
+  let options;
+  const {worker,account}=fixture(t,async(_input,_config,value)=>{options=value;return researchDecision;});
+  worker.configure({generationProvider:"external",apiBaseUrl:"https://example.org/v1",apiModel:"custom"});
+  const id=seedCandidate(worker,account);
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
+  assert.equal(options.session,undefined);assert.equal(worker.data.accounts[account.id].slang.conversation,undefined);
+});
