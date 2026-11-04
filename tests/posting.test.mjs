@@ -44,11 +44,11 @@ test("posting retrieves confirmed meanings by theme without needing the slang te
     ["毕业","已经完成目标装备搭配","游戏配装讨论"],
     ["鹰派","支持紧缩货币政策","宏观经济与债券"],
   ]) f.worker.editSlang({action:"save",accountId:f.account.id,term,meaning,context});
-  const state=f.worker.data.accounts[f.account.id].slang;
+  const state=f.worker.glossary(f.account);
   Object.assign(state.entries.find(v=>v.term === "逃课"),{verified:false,status:"pending"});
   state.entries.find(v=>v.term === "毕业").status="disabled";
-  f.worker.accountState({id:"8"}).slang={entries:[{term:"另一个账号的词",meaning:"不可跨账号使用",context:"游戏配装讨论",verified:true,status:"active"}],sources:[]};
-  f.worker.save();
+  f.worker.slangTasks.accountState({id:"8"}).slang={entries:[{term:"另一个账号的词",meaning:"不可跨账号使用",context:"游戏配装讨论",verified:true,status:"active"}],sources:[]};
+  f.worker.slangTasks.save();
   f.enable({postingPrompt:"分享配装心得"});f.advance(60000);await f.worker.tick();
   const input=f.inputs[0].input;
   assert.deepEqual(input.slang.map(v=>v.term),["轮椅"]);
@@ -582,4 +582,23 @@ test("manual posting uncertain outcomes are never retried by repeated requests o
   await postNow(f.worker,f.account);assert.equal(f.worker.status().posting.jobs[0].status,"uncertain");
   const restarted=f.create();await postNow(restarted,f.account);f.advance(60000);await restarted.tick();
   assert.equal(f.sent.length,1);
+});
+
+test("scheduled posting runs while glossary explanation waits without sharing state or cancellation",async t=>{
+ let release,entered;
+ const ready=new Promise(done=>{entered=done;});const gate=new Promise(done=>{release=done;});
+ const f=fixture(t,{generate:async input=>{
+  if(input.kind==='slang-explain'){entered();await gate;return {meaning:'游戏配装',context:'游戏讨论',confidence:0.9};}
+  return {action:'skip'};
+ }});
+ f.enable({postingPrompt:'分享配装心得'});
+ f.worker.glossary(f.account).entries.push({id:'pending',term:'轮椅',status:'pending',sources:[]});f.worker.slangTasks.save();
+ f.worker.runSlang({action:'research',accountId:f.account.id,ids:['pending']});await ready;
+ f.advance(60000);await f.worker.tick();
+ assert.equal(f.worker.status().slang.busy,true);
+ assert.ok(f.inputs.some(v=>v.input.kind==='post'));
+ assert.equal(f.sent.length,0);assert.equal(f.worker.posting.state(f.account).jobs.at(-1).status,'skipped');
+ release();await f.worker.slangTasks.running;
+ const restored=f.create();assert.equal(restored.glossary(f.account).entries[0].research.status,'done');
+ assert.equal(restored.posting.state(f.account).jobs.at(-1).status,'skipped');
 });

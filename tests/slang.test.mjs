@@ -78,7 +78,7 @@ function fixture(t, generate) {
   return { worker:new Automation({directory,account:()=>account,api,generate,wait:async()=>{}}), account, sent, directory };
 }
 
-test("learning is opt-in, works during read-only browsing and persists before comment generation", async t => {
+test("learning is opt-in, runs alongside read-only browsing and persists for later comments", async t => {
   const calls=[];
   const {worker,sent,directory,account}=fixture(t,async payload=>{
     calls.push(payload);
@@ -90,7 +90,7 @@ test("learning is opt-in, works during read-only browsing and persists before co
   worker.configure({enabled:true}); await worker.run();
   assert.equal(calls.length,0);
   worker.data.accounts[account.id].seen={}; worker.data.accounts[account.id].offset=0; worker.save();
-  worker.configure({slangLearning:true}); await worker.run();
+  worker.configure({slangLearning:true}); await worker.run();await worker.slangTasks.running;
   assert.deepEqual(calls.map(v=>v.kind),["slang"]);
   assert.equal(sent.length,0);
   const restored=new Automation({directory,account:()=>account,api:worker.api,generate:worker.generate,wait:worker.wait});
@@ -114,10 +114,10 @@ test("reply extraction keeps new meanings unconfirmed; only reviewed entries pro
   worker.controller=new AbortController();
   const a=worker.accountState(account);
   const job={kind:"reply",key:"reply:92",postId:"11",replyId:"92",input:{kind:"reply",...input,parent:"你这套配装怎么样",incoming:"这套配装真是轮椅"}};
-  await worker.interact(a,account,()=>true,job);
-  assert.deepEqual(calls.map(v=>v.kind),["slang","reply"]);
-  assert.equal(calls[1].slang[0].meaning,undefined);
-  updateSlang(slangState(a),{action:"confirm",id:a.slang.entries[0].id},Date.now());
+  await worker.interact(a,account,()=>true,job);await worker.slangTasks.running;
+  assert.deepEqual(calls.map(v=>v.kind).sort(),["reply","slang"]);
+  assert.equal(calls.find(v=>v.kind === "reply").slang[0]?.meaning,undefined);
+  worker.editSlang({accountId:account.id,action:"confirm",id:worker.glossary(account).entries[0].id});
   await worker.interact(a,account,()=>true,{...job,key:"reply:93",replyId:"93"});
   assert.equal(calls.at(-1).slang[0].meaning,candidate.meaning);
   worker.data.config.slangEnabled=false;
@@ -125,7 +125,7 @@ test("reply extraction keeps new meanings unconfirmed; only reviewed entries pro
   assert.equal(calls.at(-1).slang,undefined);
 });
 
-test("failed or cancelled learning never stores guessed meanings or sends a reply", async t => {
+test("failed or cancelled learning never stores guessed meanings", async t => {
   for (const cancel of [false,true]) {
     let worker;
     let interactions=0;
@@ -138,10 +138,10 @@ test("failed or cancelled learning never stores guessed meanings or sends a repl
       return {action:"skip"};
     }));
     worker.configure({enabled:true,autoComment:true,slangLearning:true});
-    await worker.run();
+    await worker.run();await worker.slangTasks.running;
     assert.equal(worker.status().slang.entries.length,0);
     assert.ok(!JSON.stringify(worker.status()).includes("upstream secret"));
-    assert.equal(interactions,cancel ? 0 : 1,"cancel prevents the next generation; extraction failure allows normal skip");
+    assert.equal(interactions,1,"reply generation can start before background extraction cancels");
   }
 });
 
@@ -162,10 +162,10 @@ test("reply queue reads real relationships and falls back to our saved parent be
   const a=worker.accountState(account);
   a.actions["old"]={status:"sent",commentId:"91",postId:"11",displayText:"我这套配装更省操作"};worker.save();
   await worker.run("reply");
-  assert.deepEqual(calls.map(v=>v.kind),["slang","reply"]);
-  assert.equal(calls[1].parent,"我这套配装更省操作");
-  assert.equal(calls[1].incoming,"这套配装真是轮椅");
-  assert.equal(calls[1].slang[0].meaning,candidate.meaning);
+  assert.deepEqual(calls.map(v=>v.kind).sort(),["reply","slang"]);
+  assert.equal(calls.find(v=>v.kind === "reply").parent,"我这套配装更省操作");
+  assert.equal(calls.find(v=>v.kind === "reply").incoming,"这套配装真是轮椅");
+  assert.equal(calls.find(v=>v.kind === "reply").slang[0].meaning,candidate.meaning);
   assert.equal(sent[0].reply_id,"92");assert.equal(sent[0].root_id,"90");
 });
 
@@ -262,8 +262,8 @@ test("explicit extraction analyzes retained contexts without enabling automatic 
   worker.configure({enabled:true});await worker.run();
   assert.equal(calls.length,0);assert.equal(worker.status().slang.contextCount,1);
   worker.configure({enabled:false});
-  assert.equal(worker.runSlang({action:"extract",accountId:account.id}).busy,true);
-  await worker.running;
+  assert.equal(worker.runSlang({action:"extract",accountId:account.id}).slang.busy,true);
+  await worker.slangTasks.running;
   assert.equal(worker.status().slang.entries[0].meaning,"");
   assert.equal(worker.status().slang.entries[0].status,"pending");
   assert.equal(calls[0].sources.find(v=>v.sourceId === "post:body").text,input.post.body);
@@ -272,9 +272,9 @@ test("explicit extraction analyzes retained contexts without enabling automatic 
 });
 
 function seedCandidate(worker,account) {
-  const state=slangState(worker.accountState(account));
+  const state=worker.glossary(account);
   learnSlang(state,{entries:[{term:"轮椅",sourceId:"post:body",evidence:candidate.evidence}]},input,{postId:"11",now:1});
-  worker.save();return state.entries[0].id;
+  worker.slangTasks.save();return state.entries[0].id;
 }
 const webSources=[{url:"https://example.org/glossary",title:"游戏用语",snippet:"轮椅在配装讨论中表示低操作门槛的强力配装。"}];
 const researchDecision={meaning:candidate.meaning,context:candidate.context,confidence:0.94,sourceUrls:[webSources[0].url]};
@@ -285,15 +285,15 @@ test("host search precedes model research; citations persist but only confirmati
   worker.configure({slangResearchMode:"web"});
   worker.search=async(request,signal)=>{assert.ok(!signal.aborted);assert.ok(request.query.includes("轮椅"));assert.ok(!request.query.includes(account.cookie));return {sources:webSources};};
   const id=seedCandidate(worker,account);
-  assert.equal(worker.runSlang({action:"research",accountId:account.id,ids:[id]}).runningKind,"slang");
+  assert.equal(worker.runSlang({action:"research",accountId:account.id,ids:[id]}).slang.busy,true);
   assert.throws(()=>worker.editSlang({action:"confirm",accountId:account.id,id}),/运行中/);
-  await worker.running;
+  await worker.slangTasks.running;
   const entry=worker.status().slang.entries[0];
   assert.equal(calls[0].kind,"slang-research");assert.equal(calls[0].searchSources[0].url,webSources[0].url);
   assert.equal(entry.research.status,"done");assert.equal(entry.status,"pending");assert.equal(entry.verified,false);
-  assert.equal(relevantSlang(slangState(worker.data.accounts[account.id]),input)[0].meaning,undefined);
+  assert.equal(relevantSlang(worker.glossary(account),input)[0].meaning,undefined);
   worker.editSlang({action:"confirm",accountId:account.id,id});
-  assert.equal(relevantSlang(slangState(worker.data.accounts[account.id]),input)[0].meaning,candidate.meaning);
+  assert.equal(relevantSlang(worker.glossary(account),input)[0].meaning,candidate.meaning);
   assert.equal(sent.length,0);
 });
 
@@ -303,7 +303,7 @@ test("research failure, missing search sources and fabricated citations never co
     worker.configure({slangResearchMode:"web"});
     const id=seedCandidate(worker,account);
     worker.search=async()=>{if(mode === "unavailable")throw new Error("secret-provider-key");return {sources:mode === "empty" ? [] : webSources};};
-    worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
+    worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.slangTasks.running;
     const status=worker.status();assert.equal(status.slang.entries[0].status,"pending");assert.equal(status.slang.entries[0].meaning,"");
     assert.equal(status.slang.entries[0].research.status,"error");assert.equal(status.slang.task.failed,1);
     assert.ok(!JSON.stringify(status).includes("secret-provider-key"));assert.ok(!JSON.stringify(status).includes("private upstream"));assert.equal(sent.length,0);
@@ -321,7 +321,7 @@ test("cancel or account switch during search discards research; a stopped provid
     for(let i=0;i<10 && !resolve;i++)await Promise.resolve();
     if(changeAccount){account.id="8";assert.equal(worker.status().slang.task,null);resolve({sources:webSources});}
     else worker.cancel();
-    await worker.running;assert.equal(generated,0);assert.equal(worker.status().busy,false);
+    await worker.slangTasks.running;assert.equal(generated,0);assert.equal(worker.status().busy,false);
     if(!changeAccount)assert.equal(worker.status().slang.entries[0].meaning,"");
     resolve({sources:webSources});
   }
@@ -345,12 +345,12 @@ test("default context explanation uses the selected model without a search crede
   assert.throws(()=>validateConfig({slangResearchMode:"third-party"}),/研究方式/);
   worker.search=async()=>{throw new Error("search must not run in context mode");};
   const id=seedCandidate(worker,account);
-  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.slangTasks.running;
   assert.deepEqual(calls.map(v=>v.kind),["slang-explain"]);
   const entry=worker.status().slang.entries[0];
   assert.equal(entry.meaning,candidate.meaning);assert.equal(entry.research.mode,"context");
   assert.equal(entry.status,"pending");assert.equal(entry.verified,false);assert.deepEqual(entry.research.sources,[]);
-  assert.equal(relevantSlang(slangState(worker.data.accounts[account.id]),input)[0].meaning,undefined);
+  assert.equal(relevantSlang(worker.glossary(account),input)[0].meaning,undefined);
   assert.equal(sent.length,0);
   const prompt=decisionMessages(calls[0],defaults)[0].content;
   assert.ok(prompt.includes("没有进行联网检索"));assert.ok(prompt.includes("不调用工具"));
@@ -361,7 +361,7 @@ test("missing search credentials produce actionable safe diagnostics instead of 
   worker.configure({slangResearchMode:"web"});
   worker.search=async()=>{throw Object.assign(new Error("private upstream token=do-not-print"),{code:"WEB_PROVIDER_CREDENTIAL_MISSING"});};
   const id=seedCandidate(worker,account);
-  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.slangTasks.running;
   const failure=worker.status().slang.entries[0].research;
   assert.equal(failure.code,"WEB_PROVIDER_CREDENTIAL_MISSING");assert.equal(failure.stage,"search");
   assert.ok(failure.error.includes("DEEPSEEK_API_KEY"));assert.ok(failure.error.includes("当前模型解析"));
@@ -387,26 +387,26 @@ test("slang conversations reuse across batches and restarts, rotate exactly at c
   for(const value of [0,101,1.5,"20",null])assert.throws(()=>validateConfig({slangSessionTerms:value}));
   worker.configure({slangSessionTerms:2});
   const id=seedCandidate(worker,f.account);
-  const run=async()=>{worker.runSlang({action:"research",accountId:f.account.id,ids:[id]});await worker.running;};
+  const run=async()=>{worker.runSlang({action:"research",accountId:f.account.id,ids:[id]});await worker.slangTasks.running;};
   await run();
   worker=new Automation({directory:f.directory,account:()=>f.account,api:worker.api,generate});
   await run();await run();
   assert.equal(calls[0].resume,false);assert.equal(calls[1].resume,true);
   assert.equal(calls[0].id,calls[1].id);assert.notEqual(calls[1].id,calls[2].id);assert.equal(calls[2].resume,false);
   f.account.id="other";const otherId=seedCandidate(worker,f.account);
-  worker.runSlang({action:"research",accountId:f.account.id,ids:[otherId]});await worker.running;
+  worker.runSlang({action:"research",accountId:f.account.id,ids:[otherId]});await worker.slangTasks.running;
   assert.notEqual(calls[3].id,calls[2].id);assert.equal(calls[3].resume,false);
 });
 
 test("slang failures and research mode switches keep the conversation until its cap",async t=>{
   const calls=[];let fail=false;
   const {worker,account}=fixture(t,async(_input,_config,options)=>{
-    const persisted=JSON.parse(fs.readFileSync(worker.file)).accounts[account.id].slang.conversation;
+    const persisted=JSON.parse(fs.readFileSync(worker.slangTasks.file)).accounts[account.id].slang.conversation;
     assert.equal(persisted.ready,false);assert.equal(persisted.id,options.session.id);
     calls.push(structuredClone(options.session));if(fail)throw new Error("model unavailable");return researchDecision;
   });
   const id=seedCandidate(worker,account);
-  const run=async()=>{worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;};
+  const run=async()=>{worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.slangTasks.running;};
   await run();worker.configure({slangSessionTerms:1});await run();
   assert.notEqual(calls[0].id,calls[1].id);
   worker.configure({slangSessionTerms:20});fail=true;await run();assert.equal(calls[2].id,calls[1].id);
@@ -414,7 +414,7 @@ test("slang failures and research mode switches keep the conversation until its 
   worker.configure({slangResearchMode:"web"});worker.search=async()=>({sources:webSources});await run();
   assert.equal(calls[4].id,calls[3].id);
   worker.search=async()=>{throw new Error("search down");};await run();
-  assert.equal(calls.length,5);assert.equal(worker.data.accounts[account.id].slang.conversation.used,4);
+  assert.equal(calls.length,5);assert.equal(worker.glossary(account).conversation.used,4);
 });
 
 test("external slang calls do not allocate DSH conversations",async t=>{
@@ -422,21 +422,21 @@ test("external slang calls do not allocate DSH conversations",async t=>{
   const {worker,account}=fixture(t,async(_input,_config,value)=>{options=value;return researchDecision;});
   worker.configure({generationProvider:"external",apiBaseUrl:"https://example.org/v1",apiModel:"custom"});
   const id=seedCandidate(worker,account);
-  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.running;
-  assert.equal(options.session,undefined);assert.equal(worker.data.accounts[account.id].slang.conversation,undefined);
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.slangTasks.running;
+  assert.equal(options.session,undefined);assert.equal(worker.glossary(account).conversation,undefined);
 });
 
 test("selected batches exceed twenty and rotate conversations only at the configured cap",async t=>{
   const calls=[];
   const {worker,account}=fixture(t,async(input,_config,options)=>{calls.push({term:input.term,...options.session});return researchDecision;});
   worker.configure({slangSessionTerms:20});
-  const state=slangState(worker.accountState(account));
+  const state=worker.glossary(account);
   state.entries=Array.from({length:51},(_,i)=>({id:"bulk-"+i,term:"测试词"+i,status:"pending",verified:false,sources:[]}));
   // Old releases wrote this state without actually creating the named DSH session.
   state.conversation={id:"session-heybox-slang-00000000-0000-0000-0000-000000000000",ready:true,used:1,mode:"slang-explain",launcher:'["dsh",""]'};
-  worker.save();
+  worker.slangTasks.save();
   assert.throws(()=>worker.runSlang({action:"research",accountId:account.id,ids:Array.from({length:501},(_,i)=>"bulk-"+i)}),/1–500/);
-  worker.runSlang({action:"research",accountId:account.id,ids:state.entries.map(v=>v.id)});await worker.running;
+  worker.runSlang({action:"research",accountId:account.id,ids:state.entries.map(v=>v.id)});await worker.slangTasks.running;
   assert.equal(calls.length,51);assert.equal(worker.status().slang.task.done,51);assert.equal(worker.status().slang.task.failed,0);
   assert.deepEqual([...new Set(calls.map(v=>v.id))].map(id=>calls.filter(v=>v.id===id).length),[20,20,11]);
   assert.deepEqual(calls.map((v,i)=>!v.resume?i:null).filter(v=>v!==null),[0,20,40]);
@@ -453,12 +453,12 @@ test("bulk explanation errors and restart never rotate a conversation below its 
   };
   const f=fixture(t,generate);let worker=f.worker;
   worker.configure({slangSessionTerms:3});
-  const state=slangState(worker.accountState(f.account));
-  state.entries=Array.from({length:6},(_,i)=>({id:'failed-bulk-'+i,term:'测试词'+i,status:'pending',verified:false,sources:[]}));worker.save();
-  worker.runSlang({action:'research',accountId:f.account.id,ids:['failed-bulk-0']});await worker.running;
-  assert.equal(worker.data.accounts[f.account.id].slang.conversation.ready,false);
+  const state=worker.glossary(f.account);
+  state.entries=Array.from({length:6},(_,i)=>({id:'failed-bulk-'+i,term:'测试词'+i,status:'pending',verified:false,sources:[]}));worker.slangTasks.save();
+  worker.runSlang({action:'research',accountId:f.account.id,ids:['failed-bulk-0']});await worker.slangTasks.running;
+  assert.equal(worker.glossary(f.account).conversation.ready,false);
   worker=new Automation({directory:f.directory,account:()=>f.account,generate});
-  worker.runSlang({action:'research',accountId:f.account.id,ids:state.entries.slice(1).map(v=>v.id)});await worker.running;
+  worker.runSlang({action:'research',accountId:f.account.id,ids:state.entries.slice(1).map(v=>v.id)});await worker.slangTasks.running;
   assert.equal(calls.length,6);assert.equal(worker.status().slang.task.done,5);assert.equal(worker.status().slang.task.failed,2);
   assert.equal(new Set(calls.slice(0,3).map(v=>v.id)).size,1);assert.equal(new Set(calls.slice(3).map(v=>v.id)).size,1);
   assert.notEqual(calls[2].id,calls[3].id);assert.deepEqual(calls.map(v=>v.resume),[false,true,true,false,true,true]);
@@ -473,9 +473,105 @@ test('session admission failure pauses the batch without consuming words or repl
   return researchDecision;
  });
  const id=seedCandidate(worker,account);
- worker.runSlang({action:'research',accountId:account.id,ids:[id]});await worker.running;
+ worker.runSlang({action:'research',accountId:account.id,ids:[id]});await worker.slangTasks.running;
  assert.equal(worker.status().slang.task.done,0);assert.equal(worker.status().slang.task.failed,0);assert.equal(worker.status().slang.task.pausedReason,'session busy');
- assert.equal(worker.data.accounts[account.id].slang.conversation.used,0);
- busy=false;worker.runSlang({action:'research',accountId:account.id,ids:[id]});await worker.running;
- assert.equal(calls[1].id,calls[0].id);assert.equal(calls[1].resume,true);assert.equal(worker.data.accounts[account.id].slang.conversation.used,1);
+ assert.equal(worker.glossary(account).conversation.used,0);
+ busy=false;worker.runSlang({action:'research',accountId:account.id,ids:[id]});await worker.slangTasks.running;
+ assert.equal(calls[1].id,calls[0].id);assert.equal(calls[1].resume,true);assert.equal(worker.glossary(account).conversation.used,1);
+});
+
+const deferred = () => {let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
+const explanation = {meaning:candidate.meaning,context:candidate.context,confidence:0.95};
+
+test("a blocked explanation does not block browsing, reply polling, or forum saves", async t=>{
+  const gate=deferred(),entered=deferred();
+  const {worker,account,directory}=fixture(t,async payload=>{
+    if(payload.kind === "slang-explain"){entered.resolve();await gate.promise;return explanation;}
+    return {action:"skip"};
+  });
+  worker.configure({enabled:true,autoReply:true});
+  const id=seedCandidate(worker,account);
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await entered.promise;
+  assert.equal(worker.status().busy,false);assert.equal(worker.status().slang.busy,true);
+  await worker.run("browse");await worker.run("reply");
+  assert.ok(worker.data.accounts[account.id].watched["11"]);
+  assert.ok(worker.data.accounts[account.id].replyPoll);
+  worker.configure({slangSessionTerms:1}); // Saving forum config cannot invalidate an active glossary turn.
+  gate.resolve();await worker.slangTasks.running;
+  assert.equal(worker.status().slang.task.done,1);
+  const restored=new Automation({directory,account:()=>account,api:worker.api,generate:worker.generate});
+  assert.ok(restored.data.accounts[account.id].watched["11"]);
+  assert.equal(restored.glossary(account).entries[0].research.status,"done");
+  assert.equal(restored.glossary(account).conversation.used,1);
+  assert.equal(restored.status().slang.contextCount,1);
+  assert.equal(JSON.parse(fs.readFileSync(worker.file)).accounts[account.id].slang.entries,undefined);
+});
+
+test("glossary edits and explanations can finish while a forum request holds its lock", async t=>{
+  const gate=deferred(),entered=deferred();
+  const {worker,account,directory}=fixture(t,async()=>explanation);
+  worker.configure({enabled:true});
+  const id=seedCandidate(worker,account),original=worker.api;
+  worker.api=async(...args)=>{if(args[1].endsWith("/feeds")){entered.resolve();await gate.promise;}return original(...args);};
+  const browsing=worker.run();await entered.promise;
+  worker.editSlang({action:"save",accountId:account.id,term:"测试",meaning:"人工解释",context:"人工语境"});
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await worker.slangTasks.running;
+  assert.equal(worker.status().busy,true);assert.equal(worker.status().slang.busy,false);
+  gate.resolve();await browsing;
+  const restored=new Automation({directory,account:()=>account,api:worker.api});
+  assert.equal(restored.glossary(account).entries.length,2);
+  assert.equal(restored.glossary(account).entries.find(v=>v.id===id).research.status,"done");
+  assert.ok(restored.data.accounts[account.id].watched["11"]);
+});
+
+test("stopping either lane leaves the other running; stop all cancels both",async t=>{
+ for(const stop of ["glossary","forum","all"]){
+  const started=deferred(),forum=deferred();let glossarySignal;
+  const {worker,account}=fixture(t,async(_input,_config,{signal})=>{glossarySignal=signal;started.resolve();await new Promise(done=>signal.addEventListener("abort",done,{once:true}));throw new Error("cancelled");});
+  worker.configure({enabled:true,autoReply:true});const id=seedCandidate(worker,account);
+  worker.api=async()=>{await forum.promise;return {result:{links:[]}};};
+  const browsing=worker.run();
+  worker.runSlang({action:"research",accountId:account.id,ids:[id]});await started.promise;
+  assert.throws(()=>worker.runSlang({action:"research",accountId:account.id,ids:[id]}),/正在运行/);
+  if(stop==="glossary"){
+   worker.stopSlang({accountId:account.id});assert.equal(worker.controller.signal.aborted,false);assert.equal(glossarySignal.aborted,true);
+  }else if(stop==="forum"){
+   worker.configure({enabled:false});assert.equal(worker.controller.signal.aborted,true);assert.equal(glossarySignal.aborted,false);
+  }else{
+   worker.configure({enabled:false,autoReply:false,postingEnabled:false});assert.equal(worker.controller.signal.aborted,true);assert.equal(glossarySignal.aborted,true);
+  }
+  worker.cancel();forum.resolve();await browsing;await worker.slangTasks.running;
+ }
+});
+
+test("automatic extraction queues behind explanation without holding forum work",async t=>{
+ const gate=deferred(),started=deferred(),calls=[];
+ const {worker,account}=fixture(t,async(payload,_config,{signal})=>{
+  calls.push(payload.kind);
+  if(payload.kind==="slang-explain"){started.resolve();await gate.promise;return explanation;}
+  return payload.kind==="slang" ? {entries:[]} : {action:"skip"};
+ });
+ worker.configure({enabled:true,autoComment:true,slangLearning:true});const id=seedCandidate(worker,account);
+ worker.runSlang({action:"research",accountId:account.id,ids:[id]});await started.promise;
+ await worker.run();assert.deepEqual(calls,["slang-explain","comment"]);
+ assert.equal(worker.slangTasks.pending.size,1);
+ gate.resolve();while(worker.slangTasks.running)await worker.slangTasks.running;
+ assert.deepEqual(calls,["slang-explain","comment","slang"]);
+ assert.equal(worker.slangTasks.pending.size,0);
+});
+
+test("legacy glossary migration preserves meanings, evidence and conversation count across forum saves",t=>{
+ const {worker,account,directory}=fixture(t,async()=>explanation);
+ worker.configure({enabled:true});const state=slangState(worker.accountState(account));learn(state);
+ state.conversation={protocol:2,id:"session-heybox-slang-012ac1fa-3848-42d5-9b8c-9555ef20d753",used:17,ready:true};
+ state.contexts=[{key:"legacy",input,postId:"11"}];
+ // Simulate the pre-split durable layout, without its new store.
+ fs.writeFileSync(worker.file,JSON.stringify(worker.data));fs.unlinkSync(worker.slangTasks.file);
+ const restored=new Automation({directory,account:()=>account,api:worker.api});
+ assert.equal(restored.glossary(account).conversation.used,17);
+ assert.equal(restored.glossary(account).entries[0].meaning,candidate.meaning);
+ assert.equal(restored.status().slang.contextCount,1);restored.configure({enabled:false});
+ const again=new Automation({directory,account:()=>account,api:worker.api});
+ assert.equal(again.glossary(account).conversation.id,state.conversation.id);
+ assert.equal(again.glossary(account).conversation.used,17);assert.equal(again.status().slang.contextCount,1);
 });

@@ -216,3 +216,30 @@ test('DSH reports whether a rejected slang attempt actually reached prompt admis
   await assert.rejects(generateDecision({kind:'slang-explain',term:'轮椅'},{...defaults,nodePath:process.execPath,dshCommand:entry},{directory,session:{id,resume:true},signal:new AbortController().signal}),error=>error.code==='SLANG_SESSION_BUSY'&&error.slangTurnStarted===started);
  }
 });
+
+test("concurrent forum and glossary subprocesses get separate overlays and remove them afterward",async t=>{
+ const directory=fs.mkdtempSync(path.join(os.tmpdir(),"heybox-parallel-generation-"));
+ t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+ const entry=path.join(directory,"fake-dsh.mjs");
+ fs.writeFileSync(entry,`
+  import fs from 'node:fs';
+  const overlayPath=process.argv[5];
+  // Both parent calls write their overlays before either child gets scheduled.
+  const overlay=fs.readFileSync(overlayPath,'utf8');
+  fs.appendFileSync('overlays.jsonl',JSON.stringify({path:overlayPath,text:overlay})+'\\n');
+  const match=/sessionId: "([^"]+)"/.exec(overlay);
+  if(match){process.stderr.write('heybox-session-saved:'+match[1]+'\\n');process.stdout.write(JSON.stringify({meaning:'低操作门槛的配装',context:'游戏讨论',confidence:0.9}));}
+  else process.stdout.write('{"action":"skip"}');
+ `);
+ const config={...defaults,nodePath:process.execPath,dshCommand:entry};
+ const session={id:"session-heybox-slang-012ac1fa-3848-42d5-9b8c-9555ef20d753",resume:false};
+ const [forum,slang]=await Promise.all([
+  generateDecision({kind:"comment"},config,{directory,signal:new AbortController().signal}),
+  generateDecision({kind:"slang-explain",term:"轮椅",evidence:[]},config,{directory,session,signal:new AbortController().signal})
+ ]);
+ assert.equal(forum.action,"skip");assert.equal(slang.meaning,"低操作门槛的配装");
+ const overlays=fs.readFileSync(path.join(directory,"overlays.jsonl"),"utf8").trim().split('\n').map(JSON.parse);
+ assert.equal(new Set(overlays.map(v=>v.path)).size,2);
+ assert.equal(overlays.filter(v=>v.text.includes(session.id)).length,1);
+ assert.ok(overlays.every(v=>!fs.existsSync(v.path)));
+});
