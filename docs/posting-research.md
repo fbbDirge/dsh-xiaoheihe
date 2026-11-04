@@ -112,3 +112,11 @@
 [档案馆](https://aigengtu.com/archive)提供台词检索和使用场景；[站点镜像仓库](https://github.com/the-beating-light-of-the-nail/deepseek-chan-meme-pack)公开说明 `gallery-index.json` 及 `img.aigengtu.com` 原图来源。实读目录为 `gallery → 分类 → images`，以 `alt`、`story.zh`、`original` 为主要字段；标题与描述可能存在误差，因此选图可跳过，不将目录描述视为视觉核验。
 
 上传流程按小黑盒接口获取对象信息及临时凭据，参照[腾讯 COS 签名协议](https://cloud.tencent.com/document/product/436/7778)进行 PUT，调用回调后生成文章 img 或图文 img 内容块。服务器真实上传 #060 成功，未调用公开发帖接口；没有下载全站图片。此图库适合玩梗和情绪表达，不应替代游戏实拍、新闻证据或攻略截图。
+
+### 0.13.15 文章图片标记修正
+
+用户提供「列表有图、手机正文无图」截图；只读帖子接口返回的 HTML 中仅有普通 `img src/width/height`，另有平台追加的 img 缩略图块。不能把追加的缩略图作为正文图片可见的证据。
+
+核对[官方编辑器发布模块](https://static.max-c.com/static/heybox/webapp/@heybox-spa/website/app/cpt-editor-publish.vue_vue_type_style_index_0_lang-Di5nH1Gi.js)：图片节点 toDOM 输出 p 内的 img，使用 `data-type="image"`、`data-original`、`data-width`、`data-height` 和 `data-description`。核对[官方阅读器模块](https://static.max-c.com/static/heybox/webapp/@heybox-spa/website/app/index-DndGLVEK.js)：图片解析规则选择 `img[data-original]`，普通 src 不满足选择器。新版独立实现相同标记，无需复制官方代码。
+
+REA 静态分析 Evidence：`ev_5c7a8f32775c068ce552f36098466fcb0b5461130dc780c7f01d5a466da3c861`；仅覆盖当前阅读器 bundle，动态依赖图不完整，不代表手机 App 运行轨迹。另在隔离 DOM 中运行该 bundle 的图片节点解析器（字符范围 903835–904907），旧帖 HTML 识别 0 张，新提交 HTML 识别 1 张，地址与 1184×880 尺寸一致。没有执行整个网站 bundle，没有发布或编辑公开帖子。此验证支持格式修复，不能代替手机端实际发布后的显示验收。

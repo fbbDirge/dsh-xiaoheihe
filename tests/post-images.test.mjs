@@ -95,7 +95,12 @@ test('image payload works in plain and article modes, never treats a source URL 
   const plain=JSON.parse(postBody('正文','plain',uploaded).text);
   assert.equal(plain[1].type,'img');assert.equal(plain[1].url,uploaded.url);
   const rich=JSON.parse(postBody('**重点**','rich',uploaded).text)[0];
-  assert.ok(rich.text.includes('<strong>重点</strong>'));assert.ok(rich.text.includes('<img src="https://imgheybox.max-c.com/bbs/image.png" width="8" height="6">'));
+  assert.ok(rich.text.includes('<strong>重点</strong>'));
+  // The official reader selects img[data-original], not an ordinary img[src].
+  // Feed thumbnails are separate blocks and cannot prove article visibility.
+  assert.match(rich.text, /<p><img data-type="image" data-original="https:\/\/imgheybox\.max-c\.com\/bbs\/image\.png" data-width="8" data-height="6" data-description=""><\/p>$/);
+  assert.equal(JSON.parse(postBody('**重点**','rich',uploaded).text).length,1);
+  assert.ok(!postBody('**重点**','rich').text.includes('<img'));
   assert.throws(()=>postBody('正文','rich',{...uploaded,url:'https://img.aigengtu.com/meme/060.webp'}));
 });
 

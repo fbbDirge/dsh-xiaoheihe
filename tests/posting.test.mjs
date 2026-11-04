@@ -748,7 +748,26 @@ test("uploaded image and body survive interruption, publish once and verify both
   assert.equal(f.sent.length,1);assert.equal(puts,1);
   assert.equal(f.inputs.filter(v=>v.input.kind==='post').length,1);
   assert.equal(f.inputs.filter(v=>v.input.kind==='post-image').length,1);
-  assert.ok(JSON.parse(f.sent[0].form.text)[0].text.includes('<img src="https://imgheybox.max-c.com/bbs/pic.png"'));
+  assert.ok(JSON.parse(f.sent[0].form.text)[0].text.includes('<img data-type="image" data-original="https://imgheybox.max-c.com/bbs/pic.png"'));
   assert.equal(restarted.status().posting.jobs[0].status,'verified');
+  await f.create().tick();assert.equal(f.sent.length,1);
+});
+
+test("an article thumbnail alone never verifies a missing body image or causes a repost", async t => {
+  const image={status:'uploaded',url:'https://imgheybox.max-c.com/bbs/pic.png',width:8,height:6};
+  const f=fixture(t,{readback:form=>({result:{link:{linkid:'101',title:form.title,text:JSON.stringify([
+    // Reproduce the old failure: src remains and the platform appends a feed
+    // thumbnail, but the article reader cannot recognize the image node.
+    {type:'html',text:JSON.parse(form.text)[0].text.replace(/data-original="[^"]*"/, 'src="'+image.url+'"')},
+    {type:'img',url:image.url},
+  ])}}})});
+  f.enable({postingImages:true,postingFormat:'rich'});
+  f.worker.posting.requestManual(f.account,'image-reader-regression');
+  Object.assign(f.worker.accountState(f.account).posting.jobs.at(-1),{title:'图片正文',text:'**保留加粗**',image});
+  f.worker.save();await f.worker.tick();
+  assert.equal(f.sent.length,1);
+  assert.match(JSON.parse(f.sent[0].form.text)[0].text,/data-original=/);
+  assert.equal(f.worker.status().posting.jobs[0].status,'accepted');
+  assert.match(f.worker.status().posting.jobs[0].error,/尚未核验一致/);
   await f.create().tick();assert.equal(f.sent.length,1);
 });
