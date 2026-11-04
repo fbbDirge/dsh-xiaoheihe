@@ -105,3 +105,10 @@
 ## 2026-11-04 自动排版核对
 
 直接查看[官方文章编辑器](https://www.xiaoheihe.cn/creator/editor/draft/article)的操作提示和 Markdown 帮助，确认粗体、一二级标题、引用、有序 / 无序列表。未点击发布。文章 HTML 内容块及 `link_tag=11` 对照上面的 publish.ts 实现；本插件 0.13.13 接入其格式，未复制外部实现。平台实际渲染仍需实际帖子验收，不把本地预览或模拟响应视为公开可见证明。
+
+
+## 2026-11-04 梗鲸自动配图
+
+[档案馆](https://aigengtu.com/archive)提供台词检索和使用场景；[站点镜像仓库](https://github.com/the-beating-light-of-the-nail/deepseek-chan-meme-pack)公开说明 `gallery-index.json` 及 `img.aigengtu.com` 原图来源。实读目录为 `gallery → 分类 → images`，以 `alt`、`story.zh`、`original` 为主要字段；标题与描述可能存在误差，因此选图可跳过，不将目录描述视为视觉核验。
+
+上传流程按小黑盒接口获取对象信息及临时凭据，参照[腾讯 COS 签名协议](https://cloud.tencent.com/document/product/436/7778)进行 PUT，调用回调后生成文章 img 或图文 img 内容块。服务器真实上传 #060 成功，未调用公开发帖接口；没有下载全站图片。此图库适合玩梗和情绪表达，不应替代游戏实拍、新闻证据或攻略截图。

@@ -146,19 +146,24 @@ try {
   button(page.render(),"清空编辑").props.onClick();
   button(tree, "发帖").props.onClick();
   assert.equal(control(page.render(), "发帖人格").props.maxLength, 20000);
+  control(page.render(), "发帖时自动配一张合适的图").props.onChange({target:{checked:true}});
   control(page.render(), "正文排版").props.onChange({target:{value:"rich"}});
-  server.posting={jobs:[{id:'rich-preview',format:'rich',title:'排版预览',text:'**重点**',bodyBlocks:formatPost('# 小标题\n\n**重点**\n\n- 第一项\n- 第二项\n\n> 引用 <script>alert(1)</script>').blocks}]}; await poll();
+  server.posting={jobs:[{id:'rich-preview',image:{status:'uploaded',id:'060',url:'https://imgheybox.max-c.com/bbs/pic.png',sourceUrl:'https://aigengtu.com/zh/meme/060',title:'下班休息',reason:'符合正文情绪',note:'已匹配并上传 1 张图片'},format:'rich',title:'排版预览',text:'**重点**',bodyBlocks:formatPost('# 小标题\n\n**重点**\n\n- 第一项\n- 第二项\n\n> 引用 <script>alert(1)</script>').blocks}]}; await poll();
   const preview=all(page.render()).find(n=>n.props['aria-label']==='正文排版预览');
   assert.ok(all(preview).some(n=>n.type==='strong' && text(n)==='重点'));
   assert.ok(all(preview).some(n=>n.type==='ul'));
   assert.ok(text(preview).includes('<script>alert(1)</script>'));
   assert.equal(all(preview).some(n=>n.type==='script' || n.props.dangerouslySetInnerHTML),false);
+  assert.ok(all(page.render()).some(n=>n.type==='img' && n.props.src==='/heybox/img?u='+encodeURIComponent('https://imgheybox.max-c.com/bbs/pic.png')));
+  assert.ok(text(page.render()).includes('符合正文情绪'));
+  assert.ok(text(page.render()).includes('已匹配并上传 1 张图片'));
 
   const longPersona = "# 小鲸鱼角色卡\n" + "论坛口吻，保持人格。\n".repeat(400);
   control(page.render(), "发帖人格").props.onChange({ target: { value: longPersona } });
   await all(page.render()).find(n => n.type === "form").props.onSubmit({ preventDefault() {} });
   assert.equal(server.config.postingPersona, longPersona);
   assert.equal(server.config.postingFormat,"rich");
+  assert.equal(server.config.postingImages,true);
   assert.equal(server.config.slangSessionTerms,30);
   assert.ok(text(page.render()).includes(longPersona.length + " / 20000"));
   control(page.render(), "发帖人格").props.onChange({ target: { value: "独立写作人格" } });

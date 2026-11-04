@@ -19,6 +19,7 @@ function fixture(t, options = {}) {
   const sent = [], inputs = [];
   let worker;
   const api = async (_account, endpoint, params, method, form) => {
+    if (options.imageApi && endpoint.includes("/cos/upload/")) return options.imageApi(_account, endpoint, params, method, form);
     if (method === "POST") {
       const stored = JSON.parse(fs.readFileSync(path.join(directory, "automation.json"), "utf8"));
       assert.equal(stored.accounts["7"].posting.jobs.at(-1).status, "uncertain");
@@ -34,7 +35,7 @@ function fixture(t, options = {}) {
     inputs.push({ input, config });
     return options.generate ? options.generate(input, config, context) : { action: "send", title: "游戏设计", text: "关卡设计可以更有趣。" };
   };
-  const create = () => new Automation({ directory, account: () => account, api, generate, now: () => now, wait: async ms => { now += ms; } });
+  const create = () => new Automation({ directory, account: () => account, api, generate, imageFetch:options.imageFetch, now: () => now, wait: async ms => { now += ms; } });
   worker = create();
   return { worker, create, sent, inputs, account, directory, advance: ms => { now += ms; }, setTime: value => { now = value; }, enable: patch => worker.configure({ postingEnabled: true, postingTopicId: "7214", postingPersona: "POST_PERSONA", ...patch }) };
 }
@@ -709,4 +710,45 @@ test("DSH and external model generation both parse rich quote blocks", async t =
   t.after(() => {server.closeAllConnections();server.close();});
   assert.deepEqual(await generateDecision({kind:'post',format:'rich'}, {...defaults,generationProvider:'external',apiBaseUrl:`http://127.0.0.1:${server.address().port}/v1`,apiModel:'test',apiKey:'test'}, {signal:new AbortController().signal}),decision);
 
+});
+
+
+test("image lookup failure still publishes text, mode is snapshotted and prior tasks are unchanged", async t => {
+  const f=fixture(t,{imageFetch:async()=>{throw new Error('private diagnostic');}});
+  f.enable({postingImages:true});f.worker.posting.requestManual(f.account,'image-manual-request');f.worker.save();
+  f.worker.configure({postingImages:false});const restarted=f.create();await restarted.tick();
+  assert.equal(f.sent.length,1);assert.equal(JSON.parse(f.sent[0].form.text).length,1);
+  assert.equal(restarted.status().posting.jobs[0].image.status,'failed');
+  assert.equal(restarted.status().posting.jobs[0].status,'verified');
+  assert.ok(!JSON.stringify(f.worker.status()).includes('private diagnostic'));
+  await f.create().tick();assert.equal(f.sent.length,1);
+  assert.equal(validateConfig({}).postingImages,false);assert.throws(()=>validateConfig({postingImages:'yes'}));
+});
+
+test("uploaded image and body survive interruption, publish once and verify both body and image", async t => {
+  const {default:sharp}=await import('sharp');
+  const raw=await sharp({create:{width:8,height:6,channels:3,background:'#abc'}}).png().toBuffer();
+  let puts=0;
+  const f=fixture(t,{
+    generate:async input=>input.kind==='post-image'?{action:'select',id:'060',reason:'下班休息主题一致'}:{action:'send',title:'下班了',text:'**下班休息**，今天想在沙发摸鱼放空。'},
+    imageFetch:async(url,opts)=>{
+      if(url.endsWith('gallery-index.json'))return new Response(JSON.stringify({gallery:{fish:{name:'DeepSeek娘',images:[{alt:'下班休息沙发摸鱼',original:'https://img.aigengtu.com/meme/060.png',story:{zh:'下班到家放空'}}]}}}));
+      if(opts.method==='PUT'){puts++;return new Response('');}
+      return new Response(raw);
+    },
+    imageApi:async(account,endpoint)=>({result:endpoint.includes('/info/')?{keys:['/bbs/pic.png'],bucket:'heybox-123',region:'ap-shanghai',host:'imgheybox.max-c.com'}:endpoint.includes('/token/')?{credentials:{tmpSecretId:'id',tmpSecretKey:'secret',sessionToken:'token'},startTime:1,expiredTime:1000}:{}}),
+    readback:form=>({result:{link:{linkid:'101',title:form.title,text:form.text}}}),
+  });
+  f.enable({postingImages:true,postingFormat:'rich'});f.advance(60000);
+  f.worker.data.accounts['7'].lastSendAt=at('2026-10-29T20:00:00');f.worker.save();
+  f.worker.wait=async()=>{f.worker.configure({postingEnabled:false});};
+  await f.worker.tick();assert.equal(puts,1);assert.equal(f.sent.length,0);
+  assert.equal(f.worker.status().posting.jobs[0].image.status,'uploaded');
+  const restarted=f.create();restarted.configure({postingEnabled:true,postingImages:false});f.advance(60000);await restarted.tick();
+  assert.equal(f.sent.length,1);assert.equal(puts,1);
+  assert.equal(f.inputs.filter(v=>v.input.kind==='post').length,1);
+  assert.equal(f.inputs.filter(v=>v.input.kind==='post-image').length,1);
+  assert.ok(JSON.parse(f.sent[0].form.text)[0].text.includes('<img src="https://imgheybox.max-c.com/bbs/pic.png"'));
+  assert.equal(restarted.status().posting.jobs[0].status,'verified');
+  await f.create().tick();assert.equal(f.sent.length,1);
 });
