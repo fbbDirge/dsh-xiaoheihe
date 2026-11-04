@@ -115,6 +115,7 @@ test('host routes persist confirmed account privately and never return credentia
   }
   try {
     apply({ webServer: { register(spec) { routes.set(spec.path, spec); } }, effect() {} });
+    assert.equal((await call("/heybox/health", {})).result.version, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
     assert.equal(fs.statSync(stateFile).mode & 0o777, 0o600, 'tighten legacy credential permissions');
     for (const route of ['/heybox/state', '/heybox/rpc']) {
       assert.equal((await call(route, { action: 'logout' }, { origin: 'https://other.example' })).status, 403);
