@@ -464,3 +464,18 @@ test("bulk explanation errors and restart never rotate a conversation below its 
   assert.notEqual(calls[2].id,calls[3].id);assert.deepEqual(calls.map(v=>v.resume),[false,true,true,false,true,true]);
   assert.ok(worker.status().slang.entries.every(v=>!v.verified));
 });
+
+test('session admission failure pauses the batch without consuming words or replacing its identity',async t=>{
+ const calls=[];let busy=true;
+ const {worker,account}=fixture(t,async(_input,_config,options)=>{
+  calls.push({...options.session});
+  if(busy)throw Object.assign(new Error('session busy'),{slangTurnStarted:false});
+  return researchDecision;
+ });
+ const id=seedCandidate(worker,account);
+ worker.runSlang({action:'research',accountId:account.id,ids:[id]});await worker.running;
+ assert.equal(worker.status().slang.task.done,0);assert.equal(worker.status().slang.task.failed,0);assert.equal(worker.status().slang.task.pausedReason,'session busy');
+ assert.equal(worker.data.accounts[account.id].slang.conversation.used,0);
+ busy=false;worker.runSlang({action:'research',accountId:account.id,ids:[id]});await worker.running;
+ assert.equal(calls[1].id,calls[0].id);assert.equal(calls[1].resume,true);assert.equal(worker.data.accounts[account.id].slang.conversation.used,1);
+});

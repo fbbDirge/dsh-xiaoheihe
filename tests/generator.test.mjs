@@ -207,3 +207,12 @@ test("slang recovery creates only a proven-missing owned session and fails close
     assert.equal(disposed,modern&&outcome==='wrong-owner'?1:0);
   }
 });
+
+test('DSH reports whether a rejected slang attempt actually reached prompt admission',async t=>{
+ const directory=fs.mkdtempSync(path.join(os.tmpdir(),'heybox-admission-'));t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+ const entry=path.join(directory,'fake-dsh.mjs'),id='session-heybox-slang-00000000-0000-0000-0000-000000000001';
+ for(const started of [false,true]){
+  fs.writeFileSync(entry,`process.stderr.write(${JSON.stringify((started?'heybox-session-started:'+id+'\n':'')+'dsh: SLANG_SESSION_BUSY: locked\n')});process.exit(1);`);
+  await assert.rejects(generateDecision({kind:'slang-explain',term:'轮椅'},{...defaults,nodePath:process.execPath,dshCommand:entry},{directory,session:{id,resume:true},signal:new AbortController().signal}),error=>error.code==='SLANG_SESSION_BUSY'&&error.slangTurnStarted===started);
+ }
+});
