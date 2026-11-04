@@ -602,3 +602,25 @@ test("scheduled posting runs while glossary explanation waits without sharing st
  const restored=f.create();assert.equal(restored.glossary(f.account).entries[0].research.status,'done');
  assert.equal(restored.posting.state(f.account).jobs.at(-1).status,'skipped');
 });
+
+test("skipped drafts preserve a bounded reason and remain terminal without publishing or retrying",async t=>{
+ for(const reason of ['需要今天的更新公告原文',undefined,{},'x'.repeat(201),'<script>bad</script>','\u0000']){
+  const valid=reason==='需要今天的更新公告原文';
+  assert.deepEqual(parsePostDecision(JSON.stringify({action:'skip',reason})),{action:'skip',reason:valid?reason:'模型未说明具体原因'});
+  const f=fixture(t,{generate:async()=>({action:'skip',reason})});f.enable();f.advance(60000);await f.worker.tick();
+  const job=f.worker.status().posting.jobs[0];
+  assert.equal(job.status,'skipped');assert.equal(job.error,`未发布原因：${valid?reason:'模型未说明具体原因'}`);
+  assert.equal(f.sent.length,0);assert.equal(job.sentAt,undefined);
+  const restored=f.create();assert.equal(restored.status().posting.jobs[0].error,job.error);
+  await restored.tick();assert.equal(f.inputs.length,1);assert.equal(f.sent.length,0);
+ }
+});
+
+test("post generation receives the current configured local time, not the planned slot or machine timezone",async t=>{
+ const f=fixture(t,{generate:async()=>({action:'skip',reason:'仅验证草稿输入'})});
+ f.enable({timeZone:'Asia/Shanghai'});f.advance(3*60000);await f.worker.tick();
+ assert.deepEqual(f.inputs[0].input.currentTime,{local:'2026-10-29T20:02',timeZone:'Asia/Shanghai'});
+ const messages=decisionMessages(f.inputs[0].input,f.inputs[0].config);
+ assert.deepEqual(JSON.parse(messages[1].content).currentTime,f.inputs[0].input.currentTime);
+ assert.equal(f.sent.length,0);
+});
