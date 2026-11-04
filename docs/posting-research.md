@@ -100,3 +100,8 @@
 - [dsh-xiaoheihe](https://github.com/plasta2steel/dsh-xiaoheihe/tree/32bc17d707397af48368db759548806763bca6aa)。
 - [WenfuRainbow/heybox](https://github.com/WenfuRainbow/heybox/tree/afbe8a5f0629aafcd7e17d1c56eeec84ff4dd1bf)。
 - [heibox-comment-bot](https://github.com/2646617098/heibox-comment-bot)、[xhhRobot](https://github.com/SomeOvO/xhhRobot)：交叉检查其评论 / 回复定位。
+
+
+## 2026-11-04 自动排版核对
+
+直接查看[官方文章编辑器](https://www.xiaoheihe.cn/creator/editor/draft/article)的操作提示和 Markdown 帮助，确认粗体、一二级标题、引用、有序 / 无序列表。未点击发布。文章 HTML 内容块及 `link_tag=11` 对照上面的 publish.ts 实现；本插件 0.13.13 接入其格式，未复制外部实现。平台实际渲染仍需实际帖子验收，不把本地预览或模拟响应视为公开可见证明。

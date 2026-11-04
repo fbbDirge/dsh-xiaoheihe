@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
 import { Automation, defaults, validateConfig } from "../lib/automation.js";
 import { nextPostingAt, localEpoch, parsePostDecision, parsePostingPlan } from "../lib/posting.js";
 import { decisionMessages, generateDecision } from "../lib/generator.js";
+import { formatPost, postBody } from "../lib/post-format.js";
 import { postingSlang } from "../lib/slang.js";
 
 const at = s => Date.parse(s + "+08:00");
@@ -25,6 +27,7 @@ function fixture(t, options = {}) {
       return options.receipt ?? { status: "ok", result: { link_id: "101" } };
     }
     if (endpoint.includes("topic_selection/")) return options.selectionResponse ?? { result: { topic_list: [{ topic_id: "42", name: "游戏讨论" }], hashtag_list: [{ name: "关卡设计" }] } };
+    if (options.readback) return options.readback(sent.at(-1)?.form);
     return { result: { link: { linkid: "101", title: "游戏设计", text: JSON.stringify([{ type: "text", text: "关卡设计可以更有趣。" }]) } } };
   };
   const generate = async (input, config, context) => {
@@ -623,4 +626,87 @@ test("post generation receives the current configured local time, not the planne
  const messages=decisionMessages(f.inputs[0].input,f.inputs[0].config);
  assert.deepEqual(JSON.parse(messages[1].content).currentTime,f.inputs[0].input.currentTime);
  assert.equal(f.sent.length,0);
+});
+
+
+test("automatic formatting escapes text and produces only supported article structure", () => {
+  const text = '# 配装心得\n\n先看 **操作难度**，再看输出。\n第二行。\n\n## 选择\n\n- 舒适\n- **稳定**\n\n3. 第三条\n4. 第四条\n\n> 原文 & <img src=x onerror=alert(1)>\n> 第二句';
+  const result = formatPost(text);
+  assert.deepEqual(result.blocks.map(b => b.type), ['h1', 'p', 'h2', 'ul', 'ol', 'blockquote']);
+  assert.ok(result.html.includes('<strong>操作难度</strong>'));
+  assert.ok(result.html.includes('<ol start="3"><li><p>第三条</p></li>'));
+  assert.ok(result.html.includes('&amp; &lt;img src=x onerror=alert(1)&gt;'));
+  assert.ok(!result.html.includes('<img'));
+  assert.ok(result.html.includes('<br>第二行。'));
+  assert.ok(!result.plainText.includes('**'));
+  const form = postBody(text, 'rich');
+  assert.equal(form.link_tag, '11');
+  assert.equal(JSON.parse(form.text)[0].type, 'html');
+  assert.equal(form.words_count, String(result.plainText.length));
+  assert.equal(form.desc, result.plainText.slice(0, 100));
+  assert.equal(formatPost('- 第一项\n\n- 第二项').blocks[0].items.length, 2);
+  assert.equal(formatPost('- 第一项\n\n段落\n\n- 第二项').blocks.length, 3);
+  assert.equal(formatPost('1. 第一项\n\n2. 第二项').html, '<ol><li><p>第一项</p></li><li><p>第二项</p></li></ol>');
+  assert.equal(formatPost('未闭合 **重点').html, '<p>未闭合 **重点</p>');
+  assert.equal(formatPost('[链接](javascript:alert(1))').html, '<p>[链接](javascript:alert(1))</p>');
+  assert.deepEqual(postBody('**原样**\n文字'), {text:JSON.stringify([{type:'text',text:'**原样**\n文字'}]),desc:'**原样**\n文字',words_count:'9',link_tag:'27'});
+});
+
+test("rich parser accepts quotes, rejects HTML and empty rendered content, and retains plain defaults", () => {
+  assert.equal(validateConfig({}).postingFormat, 'plain');
+  assert.throws(() => validateConfig({postingFormat:'html'}));
+  const decision = {action:'send',title:'标题',text:'> 原文\n\n**观点**'};
+  assert.equal(parsePostDecision(JSON.stringify(decision), 'rich').text, decision.text);
+  assert.throws(() => parsePostDecision(JSON.stringify(decision)));
+  for (const text of ['<script>alert(1)</script>', '> ', '\u0000']) assert.throws(() => parsePostDecision(JSON.stringify({...decision,text}), 'rich'));
+  const rich = decisionMessages({kind:'post',format:'rich'}, defaults)[0].content;
+  assert.ok(rich.includes('AI 自动排版'));
+  assert.ok(rich.includes('不强制每帖用齐格式'));
+  assert.ok(decisionMessages({kind:'post'}, defaults)[0].content.includes('正文为纯文本'));
+});
+
+test("rich job snapshots its mode across retry/restart and verifies HTML without resending", async t => {
+  const f = fixture(t, {generate:async () => {
+    if (f.inputs.length === 1) throw new Error('retry');
+    return {action:'send',title:'排版标题',text:'**重点**\n\n- 第一项\n- 第二项\n\n> 引用'};
+  },readback:form => ({result:{link:{linkid:'101',title:form.title,text:form.text}}})});
+  f.enable({postingFormat:'rich'}); f.advance(60000); await f.worker.tick();
+  f.worker.configure({postingFormat:'plain'});
+  f.advance(60000); const restarted = f.create(); await restarted.tick();
+  assert.equal(f.inputs[1].input.format,'rich');
+  assert.equal(f.sent[0].form.link_tag,'11');
+  assert.equal(f.sent[0].form.draft,'0');
+  const job = restarted.status().posting.jobs[0];
+  assert.equal(job.status,'verified');
+  assert.equal(job.bodyBlocks[0].parts[0].bold,true);
+  assert.equal(job.bodyBlocks[1].type,'ul');
+  await f.create().tick(); assert.equal(f.sent.length,1);
+});
+
+test("legacy pending jobs stay plain, rich readback with lost formatting stays accepted", async t => {
+  const f = fixture(t); f.enable(); f.worker.posting.requestManual(f.account,'legacy-request');
+  delete f.worker.data.accounts['7'].posting.jobs.at(-1).format; f.worker.save();
+  f.worker.configure({postingFormat:'rich'}); await f.create().tick();
+  assert.equal(f.inputs[0].input.format,'plain'); assert.equal(f.sent[0].form.link_tag,'27');
+  const g = fixture(t); g.enable({postingFormat:'rich'}); g.advance(60000); await g.worker.tick();
+  assert.equal(g.worker.status().posting.jobs[0].status,'accepted');
+  assert.ok(g.worker.status().posting.jobs[0].error.includes('尚未核验一致'));
+  await g.create().tick(); assert.equal(g.sent.length,1);
+});
+
+test("DSH and external model generation both parse rich quote blocks", async t => {
+  const f = fixture(t), entry = path.join(f.directory,'fake-rich.mjs');
+  const decision = {action:'send',title:'排版',text:'> 原文\n\n**观点**'};
+  fs.writeFileSync(entry, 'console.log('+JSON.stringify(JSON.stringify(decision))+');');
+  assert.deepEqual(await generateDecision({kind:'post',format:'rich'}, {...defaults,nodePath:process.execPath,dshCommand:entry}, {directory:f.directory,signal:new AbortController().signal}),decision);
+  const server = http.createServer(async (req,res) => {
+    let body=''; for await (const chunk of req) body+=chunk;
+    assert.ok(JSON.parse(body).messages[0].content.includes('AI 自动排版'));
+    res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(decision)}}]}));
+  });
+  await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
+  t.after(() => {server.closeAllConnections();server.close();});
+  assert.deepEqual(await generateDecision({kind:'post',format:'rich'}, {...defaults,generationProvider:'external',apiBaseUrl:`http://127.0.0.1:${server.address().port}/v1`,apiModel:'test',apiKey:'test'}, {signal:new AbortController().signal}),decision);
+
 });

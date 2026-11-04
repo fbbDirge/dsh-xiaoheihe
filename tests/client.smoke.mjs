@@ -1,6 +1,7 @@
 /** Load through DSH's ModuleLoader and exercise the registered settings view. */
 import fs from "node:fs";
 import assert from "node:assert/strict";
+import { formatPost } from "../lib/post-format.js";
 import { defaults } from "../lib/automation.js";
 
 let bundle;
@@ -145,10 +146,19 @@ try {
   button(page.render(),"清空编辑").props.onClick();
   button(tree, "发帖").props.onClick();
   assert.equal(control(page.render(), "发帖人格").props.maxLength, 20000);
+  control(page.render(), "正文排版").props.onChange({target:{value:"rich"}});
+  server.posting={jobs:[{id:'rich-preview',format:'rich',title:'排版预览',text:'**重点**',bodyBlocks:formatPost('# 小标题\n\n**重点**\n\n- 第一项\n- 第二项\n\n> 引用 <script>alert(1)</script>').blocks}]}; await poll();
+  const preview=all(page.render()).find(n=>n.props['aria-label']==='正文排版预览');
+  assert.ok(all(preview).some(n=>n.type==='strong' && text(n)==='重点'));
+  assert.ok(all(preview).some(n=>n.type==='ul'));
+  assert.ok(text(preview).includes('<script>alert(1)</script>'));
+  assert.equal(all(preview).some(n=>n.type==='script' || n.props.dangerouslySetInnerHTML),false);
+
   const longPersona = "# 小鲸鱼角色卡\n" + "论坛口吻，保持人格。\n".repeat(400);
   control(page.render(), "发帖人格").props.onChange({ target: { value: longPersona } });
   await all(page.render()).find(n => n.type === "form").props.onSubmit({ preventDefault() {} });
   assert.equal(server.config.postingPersona, longPersona);
+  assert.equal(server.config.postingFormat,"rich");
   assert.equal(server.config.slangSessionTerms,30);
   assert.ok(text(page.render()).includes(longPersona.length + " / 20000"));
   control(page.render(), "发帖人格").props.onChange({ target: { value: "独立写作人格" } });
