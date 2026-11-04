@@ -209,6 +209,7 @@ try {
   control(page.render(), "回复跟随浏览运行时段").props.onChange({ target: { checked: true } });
   control(page.render(), "回复人格").props.onChange({ target: { value: "认真倾听\n简洁回答" } });
   control(page.render(), "自动回复自己帖子的评论").props.onChange({ target: { checked: true } });
+  control(page.render(), "自己的每篇帖子最多回复多少条").props.onChange({ target: { value: "3" } });
   control(page.render(), "自己帖子的回复人格").props.onChange({ target: { value: "posting" } });
   control(page.render(), "评论提及对象").props.onChange({ target: { value: "custom" } });
   control(page.render(), "自定义提及昵称").props.onChange({ target: { value: "@指定用户" } });
@@ -227,6 +228,7 @@ try {
   await all(page.render()).find((n) => n.type === "form").props.onSubmit({ preventDefault() {} });
   assert.equal(server.config.replyOwnPosts, true);
   assert.equal(server.config.ownPostReplyPersona, "posting");
+  assert.equal(server.config.ownPostReplyLimit, 3);
   assert.equal(server.config.enabled, true);
   assert.equal(server.config.postsPerRound, 3);
   assert.equal(server.config.replyIntervalSeconds, 45);

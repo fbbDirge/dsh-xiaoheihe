@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Automation, defaults, validateConfig, inValley, mentionText, commentText, isNewReply } from "../lib/automation.js";
+import { Automation, defaults, validateConfig, inValley, mentionText, commentText, isNewReply, ownPostReplyUsage } from "../lib/automation.js";
 import { parseDecision } from "../lib/generator.js";
 
 function fixture(t, overrides = {}) {
@@ -817,4 +817,92 @@ test("uncertain last sends stay reserved, and a successful final attempt is neve
     if(mode === "unknown"){assert.equal(worker.status().replyQueue[0].state,"uncertain");assert.equal(sent.length,0);}
     else {assert.equal(worker.status().replyQueue.length,0);assert.equal(sent.length,1);assert.equal(worker.status().interactions[0].status,"sent");}
   }
+});
+
+function cappedOwnPosts(t, options={}) {
+  const f=fixture(t,options), api=f.worker.api;
+  let messages=[{id:'91',postId:'1'},{id:'92',postId:'1'},{id:'93',postId:'1'}];
+  f.setMessages=next=>{messages=next;};
+  f.worker.api=async(...args)=>{
+    if(args[1].endsWith('/message'))return {result:{messages:messages.map(m=>({comment_a_id:m.id,root_comment_id:m.id,linkid:m.postId,is_unread:1}))}};
+    if(args[1].endsWith('/tree'))return {result:{link:{linkid:args[2].link_id,title:'自己的帖子',text:'游戏分享',user:{userid:'7'}},comments:messages.filter(m=>m.postId===args[2].link_id).map(m=>({commentid:m.id,user:{userid:'8'},text:'有意思'}))}};
+    return api(...args);
+  };
+  return f;
+}
+
+test('own-post reply limit validates, migrates old config and applies cumulatively per post and account',async t=>{
+  assert.equal(defaults.ownPostReplyLimit,5);
+  for(const value of [0,1,5,1000])assert.equal(validateConfig({ownPostReplyLimit:value}).ownPostReplyLimit,value);
+  for(const value of [-1,1001,1.5,'5',null])assert.throws(()=>validateConfig({ownPostReplyLimit:value}));
+  const f=cappedOwnPosts(t);f.worker.configure({autoReply:true,replyOwnPosts:true,repliesPerRound:10,ownPostReplyLimit:2,dailyReplies:20});
+  await f.worker.run('reply');assert.equal(f.sent.length,2);assert.equal(f.worker.status().ownPostReplyLimitedCount,1);assert.equal(f.worker.status().replyQueue.length,0);
+  assert.equal(ownPostReplyUsage(f.worker.data.accounts['7'],'1'),2);
+  f.advance(86400000);f.setMessages([{id:'94',postId:'1'},{id:'95',postId:'2'}]);
+  const restored=new Automation({directory:f.directory,account:f.worker.account,api:f.worker.api,generate:f.worker.generate,now:f.worker.now,wait:f.worker.wait});
+  await restored.run('reply');assert.equal(f.sent.length,3);assert.equal(f.sent.at(-1).link_id,'2');
+  assert.equal(restored.data.accounts['7'].actions['reply:94'].status,'limited');
+  restored.configure({ownPostReplyLimit:3});await restored.run('reply');assert.equal(f.sent.length,3,'raising the cap never revives retired comments');
+  f.setMessages([{id:'96',postId:'1'}]);await restored.run('reply');assert.equal(f.sent.length,4);
+  f.account.id='9';assert.equal(ownPostReplyUsage(restored.accountState(f.account),'1'),0);
+  const config=JSON.parse(fs.readFileSync(restored.configFile));delete config.ownPostReplyLimit;fs.writeFileSync(restored.configFile,JSON.stringify(config));restored.reload();assert.equal(restored.data.config.ownPostReplyLimit,5);
+});
+
+test('legacy sent, accepted and uncertain replies reserve the cap, while rejected and skipped ones do not',async t=>{
+  const f=cappedOwnPosts(t);f.worker.configure({autoReply:true,replyOwnPosts:true,ownPostReplyLimit:3});
+  const a=f.worker.accountState(f.account);
+  a.actions={
+    'reply:80':{status:'sent',postId:'1',ownPost:true},
+    'reply:81':{status:'accepted',postId:'1'},
+    'reply:82':{status:'unknown',postId:'1'},
+    'reply:83':{status:'rejected',postId:'1'},
+    'reply:84':{status:'skipped',postId:'1'},
+    'post:1':{status:'sent',kind:'comment',postId:'1'},
+  };
+  a.replyQueue={82:{replyId:'82',postId:'1',attempts:1,queuedAt:1},83:{replyId:'83',postId:'1',attempts:1,queuedAt:1}};f.worker.save();
+  f.worker.api=async(_a,endpoint)=>{assert.ok(endpoint.endsWith('/message'),'already capped posts never fetch comments or generate');return {result:{messages:[{comment_a_id:'91',root_comment_id:'91',linkid:'1',is_unread:1}]}};};
+  await f.worker.run('reply');assert.equal(ownPostReplyUsage(f.worker.data.accounts['7'],'1'),3);assert.equal(f.sent.length,0);
+  assert.equal(f.worker.status().replyQueue.length,1);assert.equal(f.worker.status().replyQueue[0].state,'uncertain');
+  assert.equal(f.worker.data.accounts['7'].actions['reply:83'].status,'limited');assert.equal(f.worker.data.accounts['7'].actions['reply:91'].status,'limited');
+});
+
+test('zero cap covers own nested replies even with the top-level switch off and leaves other posts alone',async t=>{
+  for(const author of [7,8]){
+    const f=ownPostFixture(t,{author,nested:true});f.worker.configure({autoReply:true,replyOwnPosts:false,ownPostReplyLimit:0});
+    await f.worker.run('reply');assert.equal(f.sent.length,author===7?0:1);
+    if(author===7)assert.equal(f.worker.status().interactions[0].status,'limited');
+  }
+});
+
+test('unknown and accepted sends consume one own-post slot before I/O; definitive rejection and skip do not',async t=>{
+  for(const mode of ['unknown','accepted','rejected','skip']){
+    let generated=0,attempts=0;
+    const f=cappedOwnPosts(t,{generate:async()=>{generated++;return mode==='skip'&&generated===1?{action:'skip'}:{action:'send',text:'谢谢分享'};}});
+    f.worker.configure({autoReply:true,replyOwnPosts:true,ownPostReplyLimit:1,repliesPerRound:10});
+    const api=f.worker.api;
+    f.worker.api=async(...args)=>{
+      if(args[3]==='POST'){
+        attempts++;assert.equal(ownPostReplyUsage(JSON.parse(fs.readFileSync(f.worker.file)).accounts['7'],'1'),1,'reserve before sending');
+        if(mode==='unknown')throw new Error('uncertain');
+        if(mode==='rejected'&&attempts===1)throw Object.assign(new Error('rejected'),{definitive:true});
+        if(mode==='accepted')return {};
+      }
+      return api(...args);
+    };
+    await f.worker.run('reply');assert.equal(attempts,mode==='rejected'?2:1);
+    assert.equal(generated,['rejected','skip'].includes(mode)?2:1);
+    assert.equal(ownPostReplyUsage(f.worker.data.accounts['7'],'1'),1);
+    assert.equal(f.worker.data.accounts['7'].actions['reply:93'].status,'limited');
+  }
+});
+
+test('lowering the cap retires queued own replies immediately and pre-send checks enforce a changed limit',async t=>{
+  const f=cappedOwnPosts(t);f.worker.configure({autoReply:true,replyOwnPosts:true,ownPostReplyLimit:5});
+  const a=f.worker.accountState(f.account);
+  a.actions['reply:80']={status:'sent',kind:'reply',postId:'1',ownPost:true};
+  a.replyQueue={91:{replyId:'91',rootId:'91',postId:'1',queuedAt:1,attempts:0}};f.worker.save();
+  assert.equal(f.worker.configure({ownPostReplyLimit:1}).replyQueue.length,0);
+  const g=cappedOwnPosts(t,{generate:async()=>{g.worker.data.config.ownPostReplyLimit=0;return {action:'send',text:'不能发送'};}});
+  g.worker.configure({autoReply:true,replyOwnPosts:true});await g.worker.run('reply');
+  assert.equal(g.sent.length,0);assert.equal(g.worker.data.accounts['7'].actions['reply:91'].status,'limited');
 });
