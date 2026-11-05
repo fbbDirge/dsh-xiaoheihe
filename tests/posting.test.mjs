@@ -771,3 +771,42 @@ test("an article thumbnail alone never verifies a missing body image or causes a
   assert.match(f.worker.status().posting.jobs[0].error,/尚未核验一致/);
   await f.create().tick();assert.equal(f.sent.length,1);
 });
+
+test("avoiding title cards preserves literal text, real images and rich formatting", () => {
+  assert.equal(validateConfig({}).postingAvoidTitleCard,false);
+  for(const value of ['true',1,null]) assert.throws(()=>validateConfig({postingAvoidTitleCard:value}));
+  const image={url:'https://imgheybox.max-c.com/bbs/pic.png',width:8,height:6};
+  for(const pic of [null,image]) for(const format of ['plain','rich']) for(const avoid of [true,false]) {
+    const text='**保留**\n下一行 & <标签>';
+    const form=postBody(text,format,pic,avoid),blocks=JSON.parse(form.text);
+    assert.equal(form.link_tag,format==='rich'||avoid?'11':'27');
+    if(form.link_tag==='11'){
+      assert.equal(blocks.length,1);assert.equal(blocks[0].type,'html');
+      assert.ok(blocks[0].text.includes('&amp; &lt;标签&gt;'));
+      assert.equal(blocks[0].text.includes('<strong>保留</strong>'),format==='rich');
+      if(format==='plain')assert.ok(blocks[0].text.includes('**保留**<br>下一行'));
+      assert.equal(blocks[0].text.includes('data-original="'+image.url+'"'),!!pic);
+    }else assert.equal(blocks[0].text,text);
+    assert.equal(form.desc,format==='rich'?'保留\n下一行 & <标签>':text);
+    assert.equal(form.words_count,String(form.desc.length));
+  }
+});
+
+test("title-card preference is snapshotted, verified as an article and never republishes", async t => {
+  for(const avoid of [true,false]){
+    const f=fixture(t,{readback:form=>({result:{link:{linkid:'101',title:form.title,text:form.text}}})});
+    f.enable({postingAvoidTitleCard:avoid});
+    f.worker.posting.requestManual(f.account,'title-card-snapshot');f.worker.save();
+    f.worker.configure({postingAvoidTitleCard:!avoid});
+    const restarted=f.create();await restarted.tick();
+    assert.equal(f.sent[0].form.link_tag,avoid?'11':'27');
+    assert.equal(restarted.status().posting.jobs[0].status,'verified');
+    assert.equal(f.inputs[0].input.format,'plain');
+    await f.create().tick();assert.equal(f.sent.length,1);
+  }
+  const f=fixture(t);f.enable();
+  f.worker.posting.requestManual(f.account,'legacy-title-card');
+  delete f.worker.accountState(f.account).posting.jobs.at(-1).avoidTitleCard;f.worker.save();
+  f.worker.configure({postingAvoidTitleCard:true});await f.create().tick();
+  assert.equal(f.sent[0].form.link_tag,'27');
+});

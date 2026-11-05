@@ -120,3 +120,9 @@
 核对[官方编辑器发布模块](https://static.max-c.com/static/heybox/webapp/@heybox-spa/website/app/cpt-editor-publish.vue_vue_type_style_index_0_lang-Di5nH1Gi.js)：图片节点 toDOM 输出 p 内的 img，使用 `data-type="image"`、`data-original`、`data-width`、`data-height` 和 `data-description`。核对[官方阅读器模块](https://static.max-c.com/static/heybox/webapp/@heybox-spa/website/app/index-DndGLVEK.js)：图片解析规则选择 `img[data-original]`，普通 src 不满足选择器。新版独立实现相同标记，无需复制官方代码。
 
 REA 静态分析 Evidence：`ev_5c7a8f32775c068ce552f36098466fcb0b5461130dc780c7f01d5a466da3c861`；仅覆盖当前阅读器 bundle，动态依赖图不完整，不代表手机 App 运行轨迹。另在隔离 DOM 中运行该 bundle 的图片节点解析器（字符范围 903835–904907），旧帖 HTML 识别 0 张，新提交 HTML 识别 1 张，地址与 1184×880 尺寸一致。没有执行整个网站 bundle，没有发布或编辑公开帖子。此验证支持格式修复，不能代替手机端实际发布后的显示验收。
+
+### 2026-11-05 避免标题卡片
+
+核对[官方编辑器状态与发布模块](https://static.max-c.com/static/heybox/webapp/@heybox-spa/website/app/index-C9YqRDOT.js)：图文为 `link_tag=27`，文章为 `11`，预览将 `use_concept_type` 仅用于 image_text。所检查的发布字段未发现独立禁止标题图片的参数，不据此声称平台没有其他接口。REA 静态 Evidence：`ev_8cf12d0a3204fd5567e0f16ec26d24abe044ae324934f35d9cf892df5203b0bf`，仅此 bundle，依赖覆盖不完整，未执行网站代码。
+
+0.13.16 的开关通过已支持的文章模式避开图文卡片展示；纯文本安全转义后包装为 HTML，不启动额外模型或生成图片。保留真实配图；关闭则遵循原排版方式，不强制生成卡片。用户截图没有帖子 ID，无法确认截图的生成路径；没有做公开发布试验，也不声称控制平台全部列表、分享页缩略图。

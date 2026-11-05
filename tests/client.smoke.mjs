@@ -147,6 +147,7 @@ try {
   button(tree, "发帖").props.onClick();
   assert.equal(control(page.render(), "发帖人格").props.maxLength, 20000);
   control(page.render(), "发帖时自动配一张合适的图").props.onChange({target:{checked:true}});
+  control(page.render(), "避免生成标题卡片").props.onChange({target:{checked:true}});
   control(page.render(), "正文排版").props.onChange({target:{value:"rich"}});
   server.posting={jobs:[{id:'rich-preview',image:{status:'uploaded',id:'060',url:'https://imgheybox.max-c.com/bbs/pic.png',sourceUrl:'https://aigengtu.com/zh/meme/060',title:'下班休息',reason:'符合正文情绪',note:'已匹配并上传 1 张图片'},format:'rich',title:'排版预览',text:'**重点**',bodyBlocks:formatPost('# 小标题\n\n**重点**\n\n- 第一项\n- 第二项\n\n> 引用 <script>alert(1)</script>').blocks}]}; await poll();
   const preview=all(page.render()).find(n=>n.props['aria-label']==='正文排版预览');
@@ -164,6 +165,7 @@ try {
   assert.equal(server.config.postingPersona, longPersona);
   assert.equal(server.config.postingFormat,"rich");
   assert.equal(server.config.postingImages,true);
+  assert.equal(server.config.postingAvoidTitleCard,true);
   assert.equal(server.config.slangSessionTerms,30);
   assert.ok(text(page.render()).includes(longPersona.length + " / 20000"));
   control(page.render(), "发帖人格").props.onChange({ target: { value: "独立写作人格" } });
