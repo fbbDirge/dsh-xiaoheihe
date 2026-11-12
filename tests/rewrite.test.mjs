@@ -11,6 +11,7 @@ import {
   validateCookie,
   ov,
   generateSignature,
+  generateCommentRnd16,
 } from "../lib/index.js";
 
 // --- safeUrl ---------------------------------------------------------------
@@ -89,8 +90,41 @@ try {
 } finally { globalThis.fetch = originalFetch; }
 
 // Exercise the actual request builder with an offline fetch stub for both write modes.
-const { createHmac } = await import("node:crypto");
+const { createDecipheriv, webcrypto } = await import("node:crypto");
 const { platformText } = await import("../lib/platform-error.js");
+const rnd16Key = Buffer.from("HFFSTsqmvG3uGxPNXDQW+1VARfqgG4nT6LS1PX7F8NQ=", "base64"); // gitleaks:allow -- public web protocol constant
+function decodeRnd16(value) {
+  assert.match(value, /^16:[A-Za-z0-9_-]+$/);
+  const bytes = Buffer.from(value.slice(3), "base64url");
+  const decipher = createDecipheriv("aes-256-gcm", rnd16Key, bytes.subarray(0, 12));
+  decipher.setAAD(Buffer.from("heybox-rnd:v16"));
+  decipher.setAuthTag(bytes.subarray(-16));
+  return JSON.parse(Buffer.concat([decipher.update(bytes.subarray(12, -16)), decipher.final()]).toString());
+}
+// Fixed-IV comparison with the official client's Web Crypto construction.
+const fixturePath = "/bbs/app/comment/create";
+const fixtureTime = 1794447614;
+const fixtureNonce = "9F472703E6B1736ABB1751F006F79AEA";
+const fixtureIv = Uint8Array.from({length:12}, (_, i) => i);
+const webKey = await webcrypto.subtle.importKey("raw", rnd16Key, {name:"AES-GCM"}, false, ["encrypt"]);
+const webCiphertext = await webcrypto.subtle.encrypt({
+  name:"AES-GCM", iv:fixtureIv, additionalData:Buffer.from("heybox-rnd:v16"), tagLength:128,
+}, webKey, Buffer.from(JSON.stringify([String(fixtureTime), fixtureNonce, fixturePath + "/"])));
+const expectedRnd = "16:" + Buffer.concat([fixtureIv, Buffer.from(webCiphertext)]).toString("base64url");
+assert.equal(generateCommentRnd16(fixturePath, fixtureTime, fixtureNonce, fixtureIv), expectedRnd);
+assert.equal(generateCommentRnd16(fixturePath + "/", fixtureTime, fixtureNonce, fixtureIv), expectedRnd);
+assert.deepEqual(decodeRnd16(expectedRnd), [String(fixtureTime), fixtureNonce, fixturePath + "/"]);
+assert.notEqual(generateCommentRnd16(fixturePath, fixtureTime, fixtureNonce), generateCommentRnd16(fixturePath, fixtureTime, fixtureNonce));
+for (const invalid of ["-1", "01", "1.5", "NaN", "9007199254740992"]) {
+  assert.throws(() => generateCommentRnd16(fixturePath, invalid, fixtureNonce), /parameters/);
+}
+for (const invalid of ["", fixtureNonce.toLowerCase(), "not-a-nonce"]) {
+  assert.throws(() => generateCommentRnd16(fixturePath, fixtureTime, invalid), /parameters/);
+}
+for (const invalid of ["relative", "/path?query=1", "/path#fragment", "/bad path", "/bad\\path"]) {
+  assert.throws(() => generateCommentRnd16(invalid, fixtureTime, fixtureNonce), /parameters/);
+}
+assert.throws(() => generateCommentRnd16(fixturePath, fixtureTime, fixtureNonce, new Uint8Array(11)), /IV/);
 const writeCalls = [];
 try {
   globalThis.fetch = async (url, options) => {
@@ -106,12 +140,11 @@ try {
     assert.equal(url.origin,"https://api.xiaoheihe.cn");
     assert.equal(url.pathname,"/bbs/app/comment/create");
     const {hkey,_time,nonce,_rnd,...base} = Object.fromEntries(url.searchParams);
-    assert.deepEqual(base, {app:"heybox",os_type:"web",x_app:"heybox_website",x_client_type:"web",x_os_type:"Windows",x_client_version:"",client_type:"web",web_version:"3.0",version:"999.0.4"});
+    assert.deepEqual(base, {app:"heybox",heybox_id:"42",os_type:"web",x_app:"heybox_website",x_client_type:"web",x_os_type:"Windows",x_client_version:"",client_type:"web",web_version:"3.0",version:"999.0.4"});
     assert.equal(hkey,ov(url.pathname,Number(_time),nonce));
     assert.match(nonce,/^[A-F0-9]{32}$/);
     assert.ok(Math.abs(Number(_time)-Math.floor(Date.now()/1000))<5);
-    const key="Z7mFG4tQp9Ws2LxB8H"; // gitleaks:allow -- public protocol test vector, not account credentials
-    assert.equal(_rnd,"15:"+createHmac("sha256",key).update(`${key}${nonce}${_time}:${nonce}`).digest("hex"));
+    assert.deepEqual(decodeRnd16(_rnd), [_time, nonce, url.pathname + "/"]);
     assert.equal(options.method,"POST");
     assert.equal(options.redirect,"error");
     assert.equal(options.headers.Cookie,state.cookie);
