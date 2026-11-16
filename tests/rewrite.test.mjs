@@ -160,13 +160,25 @@ try {
   assert.equal(readParams.get("device_id"),state.deviceId);
   assert.equal(readParams.get("offset"),"20");
   assert.equal(readParams.has("_rnd"),false);
-  const postForm = { title: "图文标题", text: JSON.stringify([{ type: "text", text: "正文 & + %\n第二行" }]), topic_ids: "7214", draft: "0" };
-  await requestHeybox(state,"/bbs/app/api/link/post",{web_version:"3.0"},"POST",postForm);
-  const postCall = writeCalls.at(-1);
-  assert.equal(postCall.url.pathname,"/bbs/app/api/link/post");
-  assert.equal(postCall.url.searchParams.get("web_version"),"3.0");
-  assert.equal(postCall.url.searchParams.get("hkey"),ov(postCall.url.pathname,Number(postCall.url.searchParams.get("_time")),postCall.url.searchParams.get("nonce")));
-  assert.deepEqual(Object.fromEntries(new URLSearchParams(postCall.options.body)),postForm);
+  // Both publishing and draft saving must bind RND16 to the post endpoint,
+  // retain UTF-8 form content, and reject caller overrides of signing/account fields.
+  for (const draft of ["0", "1"]) {
+    for (const block of [{type:"text",text:"正文 & + %\n第二行 🐟"},{type:"html",text:'<p><strong>中文</strong> &amp; + %</p><p><img data-original="https://imgheybox.max-c.com/fixture.png"></p>'}]) {
+      const postForm = {title:"图文标题",text:JSON.stringify([block]),topic_ids:"7214",draft,link_tag:block.type === "html" ? "11" : "27"};
+      await requestHeybox(state,"/bbs/app/api/link/post",{web_version:"2.5",heybox_id:"wrong-account",_rnd:"override",_time:"0",nonce:"override",hkey:"override"},"POST",postForm);
+      const {url,options} = writeCalls.at(-1);
+      const {_time,nonce,_rnd,hkey} = Object.fromEntries(url.searchParams);
+      assert.equal(url.pathname,"/bbs/app/api/link/post");
+      assert.equal(url.searchParams.get("web_version"),"3.0");
+      assert.equal(url.searchParams.get("heybox_id"),state.heyboxId);
+      assert.equal(hkey,ov(url.pathname,Number(_time),nonce));
+      assert.deepEqual(decodeRnd16(_rnd),[_time,nonce,url.pathname+"/"]);
+      assert.ok(Math.abs(Number(_time)-Math.floor(Date.now()/1000))<5);
+      assert.equal(options.headers.Cookie,state.cookie);
+      assert.equal(options.method,"POST");
+      assert.deepEqual(Object.fromEntries(new URLSearchParams(options.body)),postForm);
+    }
+  }
 
   globalThis.fetch=async()=>new Response(JSON.stringify({status:"failed",msg:"缺失参数",result:{}}),{status:200});
   await assert.rejects(requestHeybox(state,"/bbs/app/comment/create",{},"POST",{}),(error)=>{

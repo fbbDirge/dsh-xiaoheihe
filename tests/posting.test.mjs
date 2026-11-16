@@ -514,6 +514,7 @@ test("posting rejection preserves sanitized platform diagnostics across restart"
   const job = f.create().status().posting.jobs[0];
   assert.equal(job.status, "rejected"); assert.equal(job.httpStatus, 200); assert.equal(job.platformStatus, "failed");
   assert.match(job.platformMessage, /缺失参数/); assert.ok(!JSON.stringify(job).includes("fixture-cookie")); assert.ok(!JSON.stringify(job).includes("private-key"));
+  assert.equal(job.error, `平台拒绝发布：${job.platformMessage}`);
   await f.create().tick(); assert.equal(f.sent.length, 1);
 });
 

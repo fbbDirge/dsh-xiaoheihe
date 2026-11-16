@@ -1,5 +1,15 @@
 # 发帖、定时发布与搜图调研
 
+## 2026-11-16 发帖 RND16 修复
+
+当前[官网主模块](https://static.max-c.com/static/heybox/webapp/@heybox-spa/website/app/index-C10NdQWW.js)的 `Zot()` 将 `_n.defaults.rnd` 设置为 `16`；[编辑器模块](https://static.max-c.com/static/heybox/webapp/@heybox-spa/website/app/index-PJVOL04I.js)从主模块导入同一 HTTP 客户端，`xn()` 通过其 `$post` 调用 `/bbs/app/api/link/post`。草稿使用 `draft=1`，仅自己可见使用 `view_limit=3`。这是公开脚本静态检查，不是浏览器运行抓包；REA doctor 因本机 Swift 工具链 / 沙箱缓存问题失败，本次未产生 REA Evidence。
+
+主模块 SHA-256：`f2c320b51a51b31a1a2c1aebe5ad9e63e87ac7e563547877384f9547255ab803`。服务器最近五次发帖均返回 HTTP 200、`status=failed`、`msg=缺失参数`。以同一份私有草稿对照，保持原表单及其他查询参数不变，仅补充与当前时间、nonce、发帖路径绑定的 RND16 后保存成功；读取草稿确认正文特殊字符正确。不能归因于中文编码，也不据此保证任何账号、社区或内容都能公开发布。
+
+在用户明确授权后，使用服务器已更新代码发布单条功能测试帖（`197034647`），返回 `ok` 和帖子 ID。账号读取核对标题、中文、加粗、列表、加号 / 百分号 / & 均通过；无 Cookie 读取返回 `show_captcha`，未绕过验证码，不声称已核验访客可见性。
+
+## 2026-10-29 初始调研
+
 核对日期：2026-10-29。只检查代码，没有上传图片或发布真实帖子。新增核对了两个 MCP 项目的图文 / 文章发布实现及其调度能力。
 
 ## 已有能力
